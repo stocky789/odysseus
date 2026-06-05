@@ -21,6 +21,7 @@ import workspaceModule from './workspace.js';
 import settingsModule from './settings.js';
 import cookbookModule from './cookbook.js';
 import { EVAL_PROMPTS } from './compare/index.js';
+import { PROVIDER_DEVICE_FLOWS, formatDeviceFlowError, runProviderDeviceFlow } from './providerDeviceFlow.js';
 
 // ── Module state ──────────────────────────────────────────────────────
 
@@ -58,10 +59,27 @@ const SETUP_PROVIDER_URLS = {
   'opencode-go': { name: 'OpenCode Go', url: 'https://opencode.ai/zen/go/v1' },
 };
 const SETUP_PROVIDER_NAMES = ['deepseek', 'openai', 'openrouter', 'ollama', 'xai', 'anthropic', 'groq', 'gemini', 'opencode-zen', 'opencode-go'];
-const SETUP_PROVIDER_HINT = SETUP_PROVIDER_NAMES.slice(0, -1).join(', ') + ', or ' + SETUP_PROVIDER_NAMES[SETUP_PROVIDER_NAMES.length - 1];
+const SETUP_DEVICE_AUTH_PROVIDERS = [
+  { key: 'copilot', name: 'GitHub Copilot', aliases: ['github'], command: '/setup copilot' },
+  { key: 'chatgpt-subscription', name: 'ChatGPT Subscription', aliases: ['chatgptsubscription', 'chatgpt-sub', 'codex'], command: '/setup chatgpt-subscription' },
+];
+const SETUP_PROVIDER_HINT_NAMES = SETUP_PROVIDER_NAMES.concat(SETUP_DEVICE_AUTH_PROVIDERS.map(provider => provider.key));
+const SETUP_PROVIDER_HINT = SETUP_PROVIDER_HINT_NAMES.slice(0, -1).join(', ') + ', or ' + SETUP_PROVIDER_HINT_NAMES[SETUP_PROVIDER_HINT_NAMES.length - 1];
 const SETUP_LOCAL_ICON = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:5px;"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg>';
 const SETUP_API_ICON = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:5px;"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>';
 const SETUP_SETTINGS_ICON = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
+
+function _setupApiProviderChips() {
+  return SETUP_PROVIDER_NAMES.map(name =>
+    '<span class="setup-clickable-provider" data-setup-kind="api-key" data-setup-provider="' + name + '" style="cursor:pointer;text-decoration:underline;margin-right:8px;" title="Click to setup ' + name + '">' + name + '</span>'
+  ).join(' ');
+}
+
+function _setupDeviceAuthProviderChips() {
+  return SETUP_DEVICE_AUTH_PROVIDERS.map(provider =>
+    '<span class="setup-clickable-provider" data-setup-kind="device-auth" data-setup-provider="' + provider.key + '" style="cursor:pointer;text-decoration:underline;margin-right:8px;" title="Run ' + provider.command + '">' + provider.name + '</span>'
+  ).join(' ');
+}
 
 function _setupProviderFromInput(input) {
   const raw = (input || '').trim().toLowerCase().replace(/\s+/g, '');
@@ -82,6 +100,17 @@ function _setupProviderFromInput(input) {
     grok: 'xai',
   };
   return SETUP_PROVIDER_URLS[aliases[raw] || raw] || null;
+}
+
+function _setupDeviceAuthProviderFromInput(input) {
+  const raw = (input || '').trim().toLowerCase().replace(/\s+/g, '').replace(/_/g, '-');
+  if (!raw) return '';
+  for (const provider of SETUP_DEVICE_AUTH_PROVIDERS) {
+    const candidates = [provider.key, provider.name, ...(provider.aliases || [])]
+      .map(value => String(value || '').toLowerCase().replace(/\s+/g, '').replace(/_/g, '-'));
+    if (candidates.includes(raw)) return provider.key;
+  }
+  return '';
 }
 
 function _extractSetupProviderCredential(input) {
@@ -158,9 +187,8 @@ function _setupReply(text, remember = true) {
 }
 
 function _showSetupEndpointChoices() {
-  const providers = SETUP_PROVIDER_NAMES.map(name =>
-    '<span class="setup-clickable-provider" style="cursor:pointer;text-decoration:underline;margin-right:8px;" title="Click to setup ' + name + '">' + name + '</span>'
-  ).join(' ');
+  const providers = _setupApiProviderChips();
+  const deviceAuthProviders = _setupDeviceAuthProviderChips();
   return slashReply(
     '<div class="setup-guide-no-censor" style="display:grid;gap:10px;">' +
       '<div>' +
@@ -178,6 +206,7 @@ function _showSetupEndpointChoices() {
         '<div>Paste provider name then API key (example):</div>' +
         '<pre style="margin:4px 0 0;"><code class="setup-clickable-code" style="cursor:pointer;text-decoration:underline;" title="Click to fill in chat">deepseek sk-...</code></pre>' +
         '<div style="margin-top:8px;font-size:1em;"><span>Supported providers:</span><br>' + providers + '</div>' +
+        '<div style="margin-top:8px;font-size:1em;"><span>Account sign-in:</span><br>' + deviceAuthProviders + '</div>' +
       '</div>' +
     '</div>'
   );
@@ -208,9 +237,8 @@ function _showSetupEndpointChoicesStreamed(options = {}) {
       text: 'deepseek sk-...',
       copyText: 'deepseek sk-...',
     },
-    { kind: 'p', html: '<strong>Supported providers:</strong><br>' + SETUP_PROVIDER_NAMES.map(name =>
-      '<span class="setup-clickable-provider" style="cursor:pointer;text-decoration:underline;margin-right:8px;" title="Click to setup ' + name + '">' + name + '</span>'
-    ).join(' ') },
+    { kind: 'p', html: '<strong>Supported providers:</strong><br>' + _setupApiProviderChips() },
+    { kind: 'p', html: '<strong>Account sign-in:</strong><br>' + _setupDeviceAuthProviderChips() },
   ];
   return typewriterBlocksReply(blocks, { gap: '4px', bodyClass: 'setup-guide-no-censor', interval: 3 });
 }
@@ -231,7 +259,7 @@ async function _hasConfiguredModels() {
 }
 
 function _setupProviderPrompt() {
-  const chips = SETUP_PROVIDER_NAMES.map(name =>
+  const chips = SETUP_PROVIDER_HINT_NAMES.map(name =>
     '<span style="font-weight:650;">' + name + '</span>'
   ).join('  ');
   slashReply('<b>Supported providers:</b><br>' + chips);
@@ -726,6 +754,13 @@ async function handleSetupWizard(mode, input) {
       setupMode = 'endpoint-provider';
       _showSetupUserBubble(input, false);
       await _setupProviderPrompt();
+      return;
+    }
+    const deviceAuthProvider = _setupDeviceAuthProviderFromInput(input);
+    if (deviceAuthProvider) {
+      _addMessage('user', input);
+      setupMode = false;
+      await _setupProviderDeviceFlow(deviceAuthProvider);
       return;
     }
     const paired = _extractSetupProviderCredential(input);
@@ -4980,72 +5015,53 @@ function _clearSetupCommandInput() {
   }
 }
 
-// GitHub Copilot device-flow sign-in, driven from chat (mirrors the Settings
-// "Connect GitHub Copilot" button). Replies via the setup guide messages.
-async function _setupCopilot() {
+async function _setupProviderDeviceFlow(providerKey) {
   _clearSetupGuideMessages();
-  await _setupReply('Starting GitHub Copilot sign-in…');
-  let start;
+  const config = PROVIDER_DEVICE_FLOWS[providerKey];
+  if (!config) {
+    await _setupReply('Provider not recognised.');
+    return;
+  }
+  await _setupReply(`Starting ${config.label} sign-in...`);
   try {
-    const r = await fetch(`${API_BASE}/api/copilot/device/start`, { method: 'POST', body: new FormData(), credentials: 'same-origin' });
-    start = await r.json();
-    if (!r.ok) { await _setupReply(start.detail || 'Failed to start Copilot sign-in.'); return; }
-  } catch (e) { await _setupReply('Request failed.'); return; }
-  const authUrl = start.verification_uri_complete || start.verification_uri || '';
-  await _setupReply(`Opening GitHub — approve the request (code ${start.user_code}). Waiting…`);
-  try { if (authUrl) window.open(authUrl, '_blank', 'noopener'); } catch (e) {}
-  const deadline = Date.now() + (start.expires_in || 900) * 1000;
-  const stepMs = Math.max((start.interval || 5), 2) * 1000;
-  const poll = async () => {
-    if (Date.now() > deadline) { await _setupReply('Copilot sign-in expired — run /setup copilot again.'); return; }
-    try {
-      const fd = new FormData(); fd.append('poll_id', start.poll_id);
-      const r = await fetch(`${API_BASE}/api/copilot/device/poll`, { method: 'POST', body: fd, credentials: 'same-origin' });
-      const d = await r.json();
-      if (d.status === 'authorized') {
-        const n = ((d.endpoint && d.endpoint.models) || []).length;
-        await _setupReply(`Connected — ${n} Copilot model${n !== 1 ? 's' : ''} available.`);
-        if (modelsModule) modelsModule.refreshModels(true);
-        return;
-      }
-      if (d.status === 'failed') { await _setupReply('Copilot sign-in failed (' + (d.error || 'denied') + ').'); return; }
-    } catch (e) { /* transient — keep polling */ }
-    setTimeout(poll, stepMs);
-  };
-  setTimeout(poll, stepMs);
-}
-
-async function _setupChatGPTSubscription() {
-  _clearSetupGuideMessages();
-  await _setupReply('Starting ChatGPT Subscription sign-in…');
-  let start;
-  try {
-    const r = await fetch(`${API_BASE}/api/chatgpt-subscription/device/start`, { method: 'POST', body: new FormData(), credentials: 'same-origin' });
-    start = await r.json();
-    if (!r.ok) { await _setupReply(start.detail || 'Failed to start ChatGPT Subscription sign-in.'); return; }
-  } catch (e) { await _setupReply('Request failed.'); return; }
-  const authUrl = start.verification_uri || '';
-  await _setupReply(`Opening OpenAI — enter code ${start.user_code}. Waiting…`);
-  try { if (authUrl) window.open(authUrl, '_blank', 'noopener'); } catch (e) {}
-  const deadline = Date.now() + (start.expires_in || 900) * 1000;
-  const stepMs = Math.max((start.interval || 5), 2) * 1000;
-  const poll = async () => {
-    if (Date.now() > deadline) { await _setupReply('ChatGPT Subscription sign-in expired — run /setup chatgpt-subscription again.'); return; }
-    try {
-      const fd = new FormData(); fd.append('poll_id', start.poll_id);
-      const r = await fetch(`${API_BASE}/api/chatgpt-subscription/device/poll`, { method: 'POST', body: fd, credentials: 'same-origin' });
-      const d = await r.json();
-      if (d.status === 'authorized') {
-        const n = ((d.endpoint && d.endpoint.models) || []).length;
-        await _setupReply(`Connected — ${n} ChatGPT Subscription model${n !== 1 ? 's' : ''} available.`);
-        if (modelsModule) modelsModule.refreshModels(true);
-        return;
-      }
-      if (d.status === 'failed') { await _setupReply('ChatGPT Subscription sign-in failed (' + (d.error || 'denied') + ').'); return; }
-    } catch (e) { /* transient — keep polling */ }
-    setTimeout(poll, stepMs);
-  };
-  setTimeout(poll, stepMs);
+    const result = await runProviderDeviceFlow(providerKey, {
+      onStart: async ({ start, authUrl }) => {
+        const place = providerKey === 'copilot' ? 'GitHub' : 'OpenAI';
+        const action = providerKey === 'copilot' ? 'approve the request' : 'enter the code';
+        if (providerKey === 'chatgpt-subscription') {
+          slashReply(
+            '<div class="setup-guide-no-censor" style="display:grid;gap:6px;">' +
+              '<div>Open this URL in your browser, enter the code, then come back here. Waiting...</div>' +
+              '<div>Code: <code>' + uiModule.esc(start.user_code || '') + '</code></div>' +
+              '<div><a href="' + uiModule.esc(authUrl || '') + '" target="_blank" rel="noopener noreferrer">' + uiModule.esc(authUrl || '') + '</a></div>' +
+            '</div>'
+          );
+          return;
+        }
+        await _setupReply(`Opening ${place} - ${action} (code ${start.user_code}). Waiting...`);
+      },
+      openWindow: (url) => {
+        if (providerKey === 'chatgpt-subscription') return;
+        try { if (url) window.open(url, '_blank', 'noopener'); } catch (e) {}
+      },
+    });
+    if (result.status === 'authorized') {
+      const n = ((result.endpoint && result.endpoint.models) || []).length;
+      await _setupReply(`Connected - ${n} ${config.label} model${n !== 1 ? 's' : ''} available.`);
+      if (modelsModule) modelsModule.refreshModels(true);
+      return;
+    }
+    if (result.status === 'failed') {
+      await _setupReply(`${config.label} sign-in failed (${result.error || 'denied'}).`);
+      return;
+    }
+    if (result.status === 'expired') {
+      await _setupReply(`${config.label} sign-in expired - run /setup ${providerKey} again.`);
+      return;
+    }
+  } catch (e) {
+    await _setupReply(formatDeviceFlowError(e));
+  }
 }
 
 async function _cmdSetup(args, ctx) {
@@ -5053,9 +5069,10 @@ async function _cmdSetup(args, ctx) {
   _clearSetupCommandInput();
   const topic = (args[0] || '').trim().toLowerCase();
   const topicArgs = args.slice(1);
-  if (topic === 'copilot' || topic === 'github') { await _setupCopilot(); return true; }
-  if (topic === 'chatgpt-subscription' || topic === 'chatgptsubscription' || topic === 'chatgpt-sub' || topic === 'codex') {
-    await _setupChatGPTSubscription(); return true;
+  const deviceAuthProvider = _setupDeviceAuthProviderFromInput(topic);
+  if (deviceAuthProvider) {
+    await _setupProviderDeviceFlow(deviceAuthProvider);
+    return true;
   }
   const provider = _setupProviderFromInput(topic);
   if (provider) {
@@ -6418,10 +6435,13 @@ export function initSlashCommands(deps) {
     const providerEl = e.target.closest('.setup-clickable-provider');
     if (providerEl) {
       e.preventDefault();
+      const providerKey = providerEl.dataset.setupProvider || providerEl.textContent.trim();
       const providerName = providerEl.textContent.trim();
       const messageInput = document.getElementById('message');
       if (messageInput) {
-        const text = providerName + ' sk-';
+        const text = providerEl.dataset.setupKind === 'device-auth'
+          ? '/setup ' + providerKey
+          : providerName + ' sk-';
         messageInput.value = text;
         messageInput.dispatchEvent(new Event('input', { bubbles: true }));
         messageInput.focus();

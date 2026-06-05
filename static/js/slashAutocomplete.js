@@ -5,7 +5,7 @@
 import { COMMANDS, LEGACY_ALIASES } from './slashCommands.js';
 
 const POPUP_ID = 'slash-autocomplete';
-const MAX_VISIBLE = 12;
+const MAX_VISIBLE = 14;
 
 // Flatten the registry into a searchable list of leaf entries. Each entry is
 // either a top-level command or a "cmd sub" pair (so subcommands get their
@@ -115,6 +115,17 @@ function _scoreMatch(entry, query) {
   return 0;
 }
 
+function _exactCommandGroupItems(all, query) {
+  const q = query.toLowerCase();
+  if (!/^\/[a-z0-9_-]+$/i.test(q)) return [];
+  const parent = all.find(entry => entry.token.toLowerCase() === q);
+  if (!parent) return [];
+  const prefix = q + ' ';
+  const children = all.filter(entry => entry.token.toLowerCase().startsWith(prefix));
+  if (!children.length) return [];
+  return children.concat(parent);
+}
+
 function _ensurePopup(textarea) {
   let el = document.getElementById(POPUP_ID);
   if (el) return el;
@@ -208,12 +219,17 @@ export function initSlashAutocomplete(textarea) {
     // the menu hides — we don't autocomplete mid-sentence.
     if (!v.startsWith('/') || v.includes('\n')) { hide(); return; }
     const query = v.trim();
-    items = all
+    const groupItems = _exactCommandGroupItems(all, query);
+    if (groupItems.length) {
+      items = groupItems.slice(0, MAX_VISIBLE);
+    } else {
+      items = all
       .map(e => ({ e, s: _scoreMatch(e, query) }))
       .filter(x => x.s > 0)
       .sort((a, b) => b.s - a.s)
       .slice(0, MAX_VISIBLE)
       .map(x => x.e);
+    }
     if (!items.length && query.length > 1) { hide(); return; }
     if (!items.length) {
       // Just "/" with no matches — fall back to showing everything up to MAX_VISIBLE
