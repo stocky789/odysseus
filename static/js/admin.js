@@ -5,6 +5,7 @@ import uiModule from './ui.js';
 import settingsModule from './settings.js';
 import { providerLogo } from './providers.js';
 import { sortModelObjects } from './modelSort.js';
+import { PROVIDER_DEVICE_FLOWS, formatDeviceFlowError, runProviderDeviceFlow } from './providerDeviceFlow.js';
 
 let initialized = false;
 let modalEl = null;
@@ -683,28 +684,33 @@ function initEndpointForm() {
   const pickerBtn = el('adm-provider-btn');
   const pickerMenu = el('adm-provider-menu');
   const pickerCurrent = picker ? picker.querySelector('.adm-provider-current') : null;
-  const CHATGPT_SUBSCRIPTION_PROVIDER_VALUE = 'chatgpt-subscription';
-  let chatgptPolling = false;
+  const DEVICE_AUTH_PROVIDER_VALUES = new Set(Object.keys(PROVIDER_DEVICE_FLOWS));
+  let deviceAuthPolling = false;
   function _selectedProviderOption() {
     return provider && provider.selectedOptions ? provider.selectedOptions[0] : null;
   }
-  function _isChatGPTSubscriptionSelected() {
+  function _selectedDeviceAuthProvider() {
     const opt = _selectedProviderOption();
-    return !!opt && (
-      opt.dataset.authFlow === 'chatgpt-subscription'
-      || provider.value === CHATGPT_SUBSCRIPTION_PROVIDER_VALUE
-    );
+    const flow = opt && opt.dataset ? opt.dataset.authFlow : '';
+    if (flow && DEVICE_AUTH_PROVIDER_VALUES.has(flow)) return flow;
+    return DEVICE_AUTH_PROVIDER_VALUES.has(provider.value) ? provider.value : '';
+  }
+  function _isDeviceAuthSelected() {
+    return !!_selectedDeviceAuthProvider();
   }
   function _setApiFormForProvider() {
-    const isChatGPT = _isChatGPTSubscriptionSelected();
+    const deviceAuthProvider = _selectedDeviceAuthProvider();
+    const deviceAuthConfig = PROVIDER_DEVICE_FLOWS[deviceAuthProvider] || null;
     const apiKey = el('adm-epApiKey');
     const testBtn = el('adm-epApiTestBtn');
     const addBtn = el('adm-epAddBtn');
-    const status = el('adm-chatgptStatus');
+    const status = el('adm-deviceAuthStatus');
     const msg = _endpointMsg('api');
-    if (isChatGPT) {
+    if (deviceAuthConfig) {
       urlInput.value = '';
-      urlInput.placeholder = 'ChatGPT Subscription uses OpenAI account sign-in';
+      urlInput.placeholder = deviceAuthProvider === 'copilot'
+        ? 'GitHub Copilot uses GitHub account sign-in'
+        : 'ChatGPT Subscription uses OpenAI account sign-in';
       urlInput.readOnly = true;
       if (apiKey) {
         apiKey.value = '';
@@ -712,10 +718,14 @@ function initEndpointForm() {
         apiKey.disabled = true;
       }
       if (testBtn) testBtn.disabled = true;
-      if (addBtn) addBtn.disabled = true;
+      if (addBtn) {
+        addBtn.disabled = deviceAuthPolling;
+        addBtn.textContent = deviceAuthPolling ? 'Waiting...' : (deviceAuthProvider === 'copilot' ? 'Connect' : 'Sign in');
+        addBtn.style.width = deviceAuthProvider === 'copilot' ? '82px' : '76px';
+      }
       if (kindSel) kindSel.value = 'api';
       if (msg) {
-        msg.textContent = 'Uses ChatGPT/Codex OAuth, not an OpenAI API key.';
+        msg.textContent = '';
         msg.className = '';
       }
     } else {
@@ -726,12 +736,16 @@ function initEndpointForm() {
         apiKey.disabled = false;
       }
       if (testBtn) testBtn.disabled = false;
-      if (addBtn) addBtn.disabled = false;
+      if (addBtn) {
+        addBtn.disabled = false;
+        addBtn.textContent = 'Add';
+        addBtn.style.width = '55px';
+      }
       if (msg) {
         msg.textContent = '';
         msg.className = '';
       }
-      if (!chatgptPolling && status) status.textContent = '';
+      if (!deviceAuthPolling && status) status.textContent = '';
     }
   }
   function _renderPickerMenu() {
@@ -775,11 +789,10 @@ function initEndpointForm() {
   }
 
   provider.addEventListener('change', () => {
-    if (_isChatGPTSubscriptionSelected()) {
+    if (_isDeviceAuthSelected()) {
       _setApiFormForProvider();
       _renderPickerMenu();
       _syncPickerCurrent();
-      _startChatGPTSubscriptionSetup();
       return;
     }
     if (provider.value) urlInput.value = provider.value;
@@ -873,8 +886,10 @@ function initEndpointForm() {
   const apiCancelTestBtn = el('adm-epApiCancelTestBtn');
   if (apiTestBtn) {
     apiTestBtn.addEventListener('click', async () => {
-      if (_isChatGPTSubscriptionSelected()) {
-        await _startChatGPTSubscriptionSetup();
+      if (_isDeviceAuthSelected()) {
+        const msg = _endpointMsg('api');
+        msg.textContent = '';
+        msg.className = '';
         return;
       }
       const msg = _endpointMsg('api');
@@ -924,8 +939,9 @@ function initEndpointForm() {
   }
 
   el('adm-epAddBtn').addEventListener('click', async () => {
-    if (_isChatGPTSubscriptionSelected()) {
-      await _startChatGPTSubscriptionSetup();
+    const deviceAuthProvider = _selectedDeviceAuthProvider();
+    if (deviceAuthProvider) {
+      await _startProviderDeviceAuth(deviceAuthProvider, el('adm-epAddBtn'));
       return;
     }
     const msg = _endpointMsg('api');
@@ -979,91 +995,19 @@ function initEndpointForm() {
     btn.disabled = false; btn.textContent = 'Add';
   });
 
-  // GitHub Copilot — device-flow login. Starts the flow, shows the user a
-  // code + verification link, and polls until they authorise (or it expires).
-  const copilotBtn = el('adm-copilotConnectBtn');
-  if (copilotBtn) {
-    let copilotPolling = false;
-    copilotBtn.addEventListener('click', async () => {
-      if (copilotPolling) return;
-      const status = el('adm-copilotStatus');
-      const reset = () => { copilotBtn.disabled = false; copilotBtn.textContent = 'Connect GitHub Copilot'; copilotPolling = false; };
-      status.textContent = ''; status.className = 'adm-ep-inline-msg';
-      copilotBtn.disabled = true; copilotBtn.textContent = 'Starting...';
-      copilotPolling = true;
-      let start;
-      try {
-        const res = await fetch('/api/copilot/device/start', { method: 'POST', body: new FormData(), credentials: 'same-origin' });
-        start = await res.json();
-        if (!res.ok) { status.textContent = start.detail || 'Failed to start login'; status.className = 'admin-error'; reset(); return; }
-      } catch (e) { status.textContent = 'Request failed'; status.className = 'admin-error'; reset(); return; }
-
-      const { poll_id, user_code, verification_uri, verification_uri_complete, interval, expires_in } = start;
-      // Prefer the "complete" URL — it embeds the code so the user only has to
-      // click "Authorize" (no manual code entry).
-      const authUrl = verification_uri_complete || verification_uri || '';
-      const esc = (s) => String(s || '').replace(/[<>&"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
-      copilotBtn.textContent = 'Waiting…';
-
-      // Cohesive waiting panel: spinner + status line, the device code as a
-      // copyable chip, and a primary "Authorize on GitHub" action.
-      status.className = '';
-      status.innerHTML =
-        '<div class="adm-copilot-panel">' +
-          '<div class="adm-copilot-wait"><span class="admin-spinner"></span>' +
-            '<span>Waiting for GitHub authorization…</span></div>' +
-          '<div class="adm-copilot-coderow">' +
-            '<span class="adm-copilot-code-label">Code</span>' +
-            '<code class="adm-copilot-code">' + esc(user_code) + '</code>' +
-            '<button type="button" class="admin-btn-sm adm-copilot-copy">Copy</button>' +
-          '</div>' +
-          '<a class="admin-btn-add adm-copilot-auth" href="' + encodeURI(authUrl) + '" target="_blank" rel="noopener">Authorize on GitHub ↗</a>' +
-          '<div class="adm-copilot-hint">A new tab opened on GitHub — approve there to finish. Didn\'t open? Use the button above.</div>' +
-        '</div>';
-      const copyBtn = status.querySelector('.adm-copilot-copy');
-      if (copyBtn) copyBtn.addEventListener('click', async () => {
-        try { await navigator.clipboard.writeText(user_code || ''); copyBtn.textContent = 'Copied'; setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1500); } catch (e) {}
-      });
-      try { if (authUrl) window.open(authUrl, '_blank', 'noopener'); } catch (e) {}
-
-      const deadline = Date.now() + (expires_in || 900) * 1000;
-      const stepMs = Math.max((interval || 5), 2) * 1000;
-      const done = (cls, text) => { status.className = cls; status.textContent = text; reset(); };
-      const poll = async () => {
-        if (Date.now() > deadline) { done('admin-error', 'Authorization expired — try again.'); return; }
-        try {
-          const fd = new FormData(); fd.append('poll_id', poll_id);
-          const r = await fetch('/api/copilot/device/poll', { method: 'POST', body: fd, credentials: 'same-origin' });
-          const d = await r.json();
-          if (d.status === 'authorized') {
-            const n = ((d.endpoint && d.endpoint.models) || []).length;
-            done('admin-success', '✓ Connected — ' + n + ' Copilot model' + (n !== 1 ? 's' : '') + ' available.');
-            if (d.endpoint && d.endpoint.id) _recentlyAddedEpId = String(d.endpoint.id);
-            await loadEndpoints();
-            await _selectAddedModelInChat(d.endpoint || {});
-            return;
-          }
-          if (d.status === 'failed') { done('admin-error', 'Authorization failed (' + (d.error || 'denied') + ').'); return; }
-        } catch (e) { /* transient — keep polling */ }
-        setTimeout(poll, stepMs);
-      };
-      setTimeout(poll, stepMs);
-    });
-  }
-
-  // ChatGPT Subscription — OpenAI account device-flow login. This provisions a
-  // refresh-aware endpoint backed by server-side OAuth tokens, not an API key.
-  async function _startChatGPTSubscriptionSetup(triggerEl = null) {
-    if (chatgptPolling) return;
-    const status = el('adm-chatgptStatus') || _endpointMsg('api');
+  async function _startProviderDeviceAuth(providerKey, triggerEl = null) {
+    if (deviceAuthPolling) return;
+    const config = PROVIDER_DEVICE_FLOWS[providerKey];
+    if (!config) return;
+    const status = el('adm-deviceAuthStatus') || _endpointMsg('api');
     if (!status) return;
     const triggerText = triggerEl ? triggerEl.textContent : '';
     const reset = () => {
       if (triggerEl) {
         triggerEl.disabled = false;
-        triggerEl.textContent = triggerText || 'ChatGPT Subscription';
+        triggerEl.textContent = triggerText || 'Add';
       }
-      chatgptPolling = false;
+      deviceAuthPolling = false;
       _setApiFormForProvider();
     };
     status.textContent = '';
@@ -1072,66 +1016,72 @@ function initEndpointForm() {
       triggerEl.disabled = true;
       triggerEl.textContent = 'Starting...';
     }
-    chatgptPolling = true;
+    deviceAuthPolling = true;
     _setApiFormForProvider();
-    status.textContent = 'Starting ChatGPT Subscription sign-in…';
-    let start;
+    status.textContent = `Starting ${config.label} sign-in...`;
+
     try {
-      const res = await fetch('/api/chatgpt-subscription/device/start', { method: 'POST', body: new FormData(), credentials: 'same-origin' });
-      start = await res.json();
-      if (!res.ok) { status.textContent = start.detail || 'Failed to start login'; status.className = 'admin-error'; reset(); return; }
-    } catch (e) { status.textContent = 'Request failed'; status.className = 'admin-error'; reset(); return; }
-
-    const { poll_id, user_code, verification_uri, interval, expires_in } = start;
-    const authUrl = verification_uri || '';
-    const esc = (s) => String(s || '').replace(/[<>&"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
-    if (triggerEl) triggerEl.textContent = 'Waiting…';
-
-    status.className = '';
-    status.innerHTML =
-      '<div class="adm-copilot-panel">' +
-        '<div class="adm-copilot-wait"><span class="admin-spinner"></span>' +
-          '<span>Waiting for ChatGPT authorization…</span></div>' +
-        '<div class="adm-copilot-coderow">' +
-          '<span class="adm-copilot-code-label">Code</span>' +
-          '<code class="adm-copilot-code">' + esc(user_code) + '</code>' +
-          '<button type="button" class="admin-btn-sm adm-chatgpt-copy">Copy</button>' +
-        '</div>' +
-        '<a class="admin-btn-add adm-copilot-auth" href="' + encodeURI(authUrl) + '" target="_blank" rel="noopener">Authorize with OpenAI ↗</a>' +
-        '<div class="adm-copilot-hint">ChatGPT Subscription uses ChatGPT/Codex OAuth, not an OpenAI API key. A new tab opened at OpenAI — enter the code there to finish.</div>' +
-      '</div>';
-    const copyBtn = status.querySelector('.adm-chatgpt-copy');
-    if (copyBtn) copyBtn.addEventListener('click', async () => {
-      try { await navigator.clipboard.writeText(user_code || ''); copyBtn.textContent = 'Copied'; setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1500); } catch (e) {}
-    });
-    try { if (authUrl) window.open(authUrl, '_blank', 'noopener'); } catch (e) {}
-
-    const deadline = Date.now() + (expires_in || 900) * 1000;
-    const stepMs = Math.max((interval || 5), 2) * 1000;
-    const done = (cls, text) => { status.className = cls; status.textContent = text; reset(); };
-    const poll = async () => {
-      if (Date.now() > deadline) { done('admin-error', 'Authorization expired — try again.'); return; }
-      try {
-        const fd = new FormData(); fd.append('poll_id', poll_id);
-        const r = await fetch('/api/chatgpt-subscription/device/poll', { method: 'POST', body: fd, credentials: 'same-origin' });
-        const d = await r.json();
-        if (d.status === 'authorized') {
-          const n = ((d.endpoint && d.endpoint.models) || []).length;
-          done('admin-success', '✓ Connected — ' + n + ' ChatGPT model' + (n !== 1 ? 's' : '') + ' available.');
-          if (d.endpoint && d.endpoint.id) _recentlyAddedEpId = String(d.endpoint.id);
-          await loadEndpoints();
-          await _selectAddedModelInChat(d.endpoint || {});
-          return;
-        }
-        if (d.status === 'failed') { done('admin-error', 'Authorization failed (' + (d.error || 'denied') + ').'); return; }
-      } catch (e) { /* transient — keep polling */ }
-      setTimeout(poll, stepMs);
-    };
-    setTimeout(poll, stepMs);
+      const result = await runProviderDeviceFlow(providerKey, {
+        openWindow: () => {},
+        onStart: ({ start, authUrl }) => {
+          if (triggerEl) triggerEl.textContent = 'Waiting...';
+          status.className = '';
+          const authLabel = providerKey === 'copilot' ? 'Authorize on GitHub' : 'Authorize with OpenAI';
+          const waitLabel = providerKey === 'copilot' ? 'Waiting for GitHub authorization...' : 'Waiting for ChatGPT authorization...';
+          const hint = providerKey === 'copilot'
+            ? 'Use the button above to open GitHub, then approve the device request.'
+            : 'Use the button above to open OpenAI, then enter the code to finish.';
+          status.innerHTML =
+            '<div class="adm-copilot-panel">' +
+              '<div class="adm-copilot-wait"><span class="admin-spinner"></span>' +
+                '<span>' + esc(waitLabel) + '</span></div>' +
+              '<div class="adm-copilot-coderow">' +
+                '<span class="adm-copilot-code-label">Code</span>' +
+                '<code class="adm-copilot-code">' + esc(start.user_code) + '</code>' +
+                '<button type="button" class="admin-btn-sm adm-device-auth-copy">Copy</button>' +
+              '</div>' +
+              '<a class="admin-btn-add adm-copilot-auth" href="' + encodeURI(authUrl || '') + '" target="_blank" rel="noopener">' + esc(authLabel) + ' ↗</a>' +
+              '<div class="adm-copilot-hint">' + esc(hint) + '</div>' +
+            '</div>';
+          const copyBtn = status.querySelector('.adm-device-auth-copy');
+          if (copyBtn) copyBtn.addEventListener('click', async () => {
+            try {
+              await navigator.clipboard.writeText(start.user_code || '');
+              copyBtn.textContent = 'Copied';
+              setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1500);
+            } catch (e) {}
+          });
+        },
+      });
+      if (result.status === 'authorized') {
+        const endpoint = result.endpoint || {};
+        const n = ((endpoint && endpoint.models) || []).length;
+        status.className = 'admin-success';
+        status.textContent = 'Connected - ' + n + ' ' + config.label + ' model' + (n !== 1 ? 's' : '') + ' available.';
+        if (endpoint && endpoint.id) _recentlyAddedEpId = String(endpoint.id);
+        await loadEndpoints();
+        await _selectAddedModelInChat(endpoint || {});
+        reset();
+        return;
+      }
+      if (result.status === 'failed') {
+        status.className = 'admin-error';
+        status.textContent = 'Authorization failed (' + (result.error || 'denied') + ').';
+        reset();
+        return;
+      }
+      if (result.status === 'expired') {
+        status.className = 'admin-error';
+        status.textContent = 'Authorization expired - try again.';
+        reset();
+        return;
+      }
+    } catch (e) {
+      status.textContent = formatDeviceFlowError(e);
+      status.className = 'admin-error';
+      reset();
+    }
   }
-
-  const chatgptBtn = el('adm-chatgptConnectBtn');
-  if (chatgptBtn) chatgptBtn.addEventListener('click', () => _startChatGPTSubscriptionSetup(chatgptBtn));
 
   // Local "Add" button — sibling form for self-hosted base URLs.
   const localAddBtn = el('adm-epLocalAddBtn');

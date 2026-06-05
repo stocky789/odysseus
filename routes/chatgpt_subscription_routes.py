@@ -2,29 +2,24 @@
 
 import json
 import logging
-import threading
-import time
 import uuid
 from typing import Dict, Optional
 
-from fastapi import APIRouter, Form, HTTPException, Request
+from fastapi import HTTPException, Request
 
 from core.database import ModelEndpoint, ProviderAuthSession, SessionLocal, utcnow_naive
-from core.middleware import require_admin
+from routes.device_flow import (
+    DeviceFlowPoll,
+    DeviceFlowStart,
+    PendingDeviceFlowStore,
+    create_device_flow_router,
+)
 from src.auth_helpers import get_current_user
 from src import chatgpt_subscription
 
 logger = logging.getLogger(__name__)
 
-_PENDING: Dict[str, Dict] = {}
-_PENDING_LOCK = threading.Lock()
-
-
-def _prune_expired() -> None:
-    now = time.time()
-    with _PENDING_LOCK:
-        for key in [k for k, v in _PENDING.items() if v.get("expires_at", 0) < now]:
-            _PENDING.pop(key, None)
+_DEVICE_FLOW_STORE = PendingDeviceFlowStore()
 
 
 def _provision_endpoint(tokens: Dict, owner: Optional[str]) -> Dict:
@@ -111,101 +106,65 @@ def _provision_endpoint(tokens: Dict, owner: Optional[str]) -> Dict:
     return result
 
 
-def setup_chatgpt_subscription_routes() -> APIRouter:
-    router = APIRouter(prefix="/api/chatgpt-subscription", tags=["chatgpt-subscription"])
+def _start_device_flow(request: Request, _form) -> DeviceFlowStart:
+    try:
+        data = chatgpt_subscription.request_device_code()
+    except Exception as exc:
+        raise chatgpt_subscription.to_http_exception(exc)
 
-    @router.post("/device/start")
-    def device_start(request: Request):
-        require_admin(request)
-        _prune_expired()
-        try:
-            data = chatgpt_subscription.request_device_code()
-        except Exception as exc:
-            raise chatgpt_subscription.to_http_exception(exc)
-
-        device_auth_id = data.get("device_auth_id")
-        user_code = data.get("user_code")
-        if not device_auth_id or not user_code:
-            raise HTTPException(502, "ChatGPT did not return a complete device code")
-        interval = int(data.get("interval") or 5)
-        expires_in = int(data.get("expires_in") or 900)
-        poll_id = uuid.uuid4().hex
-        verification_uri = data.get("verification_uri") or f"{chatgpt_subscription.CHATGPT_OAUTH_ISSUER}/codex/device"
-        with _PENDING_LOCK:
-            _PENDING[poll_id] = {
-                "device_auth_id": device_auth_id,
-                "user_code": user_code,
-                "owner": get_current_user(request) or None,
-                "expires_at": time.time() + expires_in,
-                "interval": interval,
-                "next_poll_at": 0.0,
-            }
-        return {
-            "poll_id": poll_id,
+    device_auth_id = data.get("device_auth_id")
+    user_code = data.get("user_code")
+    if not device_auth_id or not user_code:
+        raise HTTPException(502, "ChatGPT did not return a complete device code")
+    verification_uri = data.get("verification_uri") or f"{chatgpt_subscription.CHATGPT_OAUTH_ISSUER}/codex/device"
+    return DeviceFlowStart(
+        pending={
+            "device_auth_id": device_auth_id,
+            "user_code": user_code,
+            "owner": get_current_user(request) or None,
+        },
+        response={
             "user_code": user_code,
             "verification_uri": verification_uri,
-            "interval": interval,
-            "expires_in": expires_in,
-        }
+        },
+        interval=int(data.get("interval") or 5),
+        expires_in=int(data.get("expires_in") or 900),
+    )
 
-    @router.post("/device/poll")
-    def device_poll(request: Request, poll_id: str = Form(...)):
-        require_admin(request)
-        _prune_expired()
-        with _PENDING_LOCK:
-            pending = _PENDING.get(poll_id)
-        if not pending:
-            raise HTTPException(404, "Unknown or expired login session")
 
-        now = time.time()
-        if now < pending.get("next_poll_at", 0):
-            return {"status": "pending"}
+def _poll_device_flow(_request: Request, pending: Dict) -> DeviceFlowPoll:
+    try:
+        data = chatgpt_subscription.poll_device_auth(pending["device_auth_id"], pending["user_code"])
+    except Exception as exc:
+        logger.debug("ChatGPT device poll failed: %s", exc)
+        return DeviceFlowPoll.pending(str(exc))
 
+    authorization_code = data.get("authorization_code")
+    code_verifier = data.get("code_verifier")
+    if authorization_code and code_verifier:
         try:
-            data = chatgpt_subscription.poll_device_auth(pending["device_auth_id"], pending["user_code"])
+            tokens = chatgpt_subscription.exchange_authorization_code(authorization_code, code_verifier)
+            result = _provision_endpoint(tokens, pending["owner"])
         except Exception as exc:
-            logger.debug("ChatGPT device poll failed: %s", exc)
-            return {"status": "pending", "detail": str(exc)}
+            logger.exception("ChatGPT Subscription endpoint provisioning failed")
+            raise chatgpt_subscription.to_http_exception(exc)
+        return DeviceFlowPoll.authorized(result)
 
-        authorization_code = data.get("authorization_code")
-        code_verifier = data.get("code_verifier")
-        if authorization_code and code_verifier:
-            try:
-                tokens = chatgpt_subscription.exchange_authorization_code(authorization_code, code_verifier)
-                result = _provision_endpoint(tokens, pending["owner"])
-            except Exception as exc:
-                logger.exception("ChatGPT Subscription endpoint provisioning failed")
-                with _PENDING_LOCK:
-                    _PENDING.pop(poll_id, None)
-                raise chatgpt_subscription.to_http_exception(exc)
-            with _PENDING_LOCK:
-                _PENDING.pop(poll_id, None)
-            return {"status": "authorized", "endpoint": result}
+    err = data.get("error") or data.get("status")
+    if err in ("authorization_pending", "pending", None):
+        return DeviceFlowPoll.pending()
+    if err == "slow_down":
+        return DeviceFlowPoll.slow_down(int(data.get("interval") or 0) or None)
+    if err in ("expired_token", "access_denied", "denied"):
+        return DeviceFlowPoll.failed(err)
+    return DeviceFlowPoll.pending(err or "unknown")
 
-        err = data.get("error") or data.get("status")
-        if err in ("authorization_pending", "pending", None):
-            with _PENDING_LOCK:
-                if poll_id in _PENDING:
-                    _PENDING[poll_id]["next_poll_at"] = now + pending["interval"]
-            return {"status": "pending"}
-        if err == "slow_down":
-            new_interval = int(data.get("interval") or (pending["interval"] + 5))
-            with _PENDING_LOCK:
-                if poll_id in _PENDING:
-                    _PENDING[poll_id]["interval"] = new_interval
-                    _PENDING[poll_id]["next_poll_at"] = now + new_interval
-            return {"status": "pending"}
-        if err in ("expired_token", "access_denied", "denied"):
-            with _PENDING_LOCK:
-                _PENDING.pop(poll_id, None)
-            return {"status": "failed", "error": err}
-        return {"status": "pending", "detail": err or "unknown"}
 
-    @router.post("/device/cancel")
-    def device_cancel(request: Request, poll_id: str = Form(...)):
-        require_admin(request)
-        with _PENDING_LOCK:
-            _PENDING.pop(poll_id, None)
-        return {"status": "cancelled"}
-
-    return router
+def setup_chatgpt_subscription_routes():
+    return create_device_flow_router(
+        prefix="/api/chatgpt-subscription",
+        tags=["chatgpt-subscription"],
+        store=_DEVICE_FLOW_STORE,
+        start_flow=_start_device_flow,
+        poll_flow=_poll_device_flow,
+    )
