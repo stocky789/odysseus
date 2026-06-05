@@ -11,7 +11,7 @@ from core.session_manager import SessionManager
 from core.models import ChatMessage
 from src.request_models import SessionResponse
 from core.database import Session as DbSession, SessionLocal, Document, GalleryImage
-from src.auth_helpers import get_current_user, effective_user
+from src.auth_helpers import get_current_user, effective_user, require_user
 
 
 def _sanitize_export_filename(name: str) -> str:
@@ -92,35 +92,35 @@ def _reject_compact_during_active_run(session_id: str) -> None:
 
 
 def _verify_session_owner(request: Request, session_id: str, session_manager=None):
-    """Verify the current user owns the session. Raises 404 if not.
+    """Verify the current user owns the session, honoring single-user modes.
 
-    Ownership is checked against the DB row when one exists (unchanged). If
-    there is no DB row but the caller owns an in-memory "ghost" session — one
-    that lives only in ``session_manager`` because it was never persisted, or
-    its DB row was removed out-of-band — fall back to the in-memory owner so the
-    user can still manage and delete it. Without this fallback such sessions are
-    listed by ``/api/sessions`` (they come from the in-memory manager) yet every
-    per-session operation 404s, making them impossible to delete (issue #1044).
-
-    ``session_manager`` is optional and defaults to ``None`` so existing callers
-    that only care about persisted sessions keep their exact prior behavior.
+    When auth is disabled (or an allowed first-run/localhost bypass is active),
+    ``require_user`` returns an empty string. Treat that as single-user mode:
+    verify the session exists, but do not compare its stored owner. This keeps
+    QA/dev instances with AUTH_ENABLED=false from 403-ing owner-stamped rows
+    created while auth was previously enabled.
     """
     user = effective_user(request)
     if not user:
-        raise HTTPException(403, "Authentication required")
+        try:
+            user = require_user(request)
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(403, "Authentication required")
     db = SessionLocal()
     try:
         row = db.query(DbSession.owner).filter(DbSession.id == session_id).first()
     finally:
         db.close()
     if row is not None:
-        if row.owner != user:
+        if user and row.owner != user:
             raise HTTPException(404, f"Session {session_id} not found")
         return
     # No DB row — allow the caller to act on an in-memory ghost they own.
     if session_manager is not None:
         ghost = getattr(session_manager, "sessions", {}).get(session_id)
-        if ghost is not None and getattr(ghost, "owner", None) == user:
+        if ghost is not None and (not user or getattr(ghost, "owner", None) == user):
             return
     raise HTTPException(404, f"Session {session_id} not found")
 
@@ -370,8 +370,13 @@ def setup_session_routes(session_manager: SessionManager, config: dict, webhook_
             pass
         elif not model_to_use:
             from src.llm_core import list_model_ids
-            ids = list_model_ids(endpoint_url, timeout=REQUEST_TIMEOUT,
-                                 headers=validation_headers)
+            ids = list_model_ids(
+                endpoint_url,
+                timeout=REQUEST_TIMEOUT,
+                headers=validation_headers,
+                owner=user,
+                endpoint_id=endpoint_id.strip() if endpoint_id else None,
+            )
             if not ids:
                 raise HTTPException(400, "Cannot reach /v1/models")
             # Default to the first CHAT model — endpoints often list embedding/
@@ -385,8 +390,13 @@ def setup_session_routes(session_manager: SessionManager, config: dict, webhook_
             from src.llm_core import list_model_ids
             import os as _os
             req_base = _os.path.basename(model_to_use.rstrip("/"))
-            avail = list_model_ids(endpoint_url, timeout=REQUEST_TIMEOUT,
-                                   headers=validation_headers)
+            avail = list_model_ids(
+                endpoint_url,
+                timeout=REQUEST_TIMEOUT,
+                headers=validation_headers,
+                owner=user,
+                endpoint_id=endpoint_id.strip() if endpoint_id else None,
+            )
             if not avail:
                 raise HTTPException(400, "Cannot reach /v1/models")
             if model_to_use not in avail:

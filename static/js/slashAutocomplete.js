@@ -81,6 +81,23 @@ function _flatten() {
   return out;
 }
 
+async function _loadSkillEntries() {
+  try {
+    const res = await fetch('/api/skills/slash-catalog', { credentials: 'same-origin' });
+    if (!res.ok) return [];
+    const data = await res.json();
+    return (Array.isArray(data.skills) ? data.skills : []).map(s => ({
+      token: s.token || `/${s.name}`,
+      aliases: [],
+      category: s.category || 'Skills',
+      help: s.help || 'Run skill',
+      usage: s.usage || `${s.token || `/${s.name}`} <request>`,
+    })).filter(e => e.token && e.token.startsWith('/'));
+  } catch {
+    return [];
+  }
+}
+
 function _scoreMatch(entry, query) {
   // query already starts with "/". Match against token + aliases. Prefix wins
   // over substring; alias match scores slightly lower than token match.
@@ -164,7 +181,7 @@ export function initSlashAutocomplete(textarea) {
   if (!textarea || textarea._slashAcWired) return;
   textarea._slashAcWired = true;
 
-  const all = _flatten();
+  let all = _flatten();
   let popup = null;
   let visible = false;
   let items = [];
@@ -206,6 +223,19 @@ export function initSlashAutocomplete(textarea) {
     show();
     _render(popup, items, selectedIdx, query);
   };
+
+  _loadSkillEntries().then(skillEntries => {
+    if (!skillEntries.length) return;
+    const seen = new Set(all.map(e => e.token));
+    const merged = all.slice();
+    for (const entry of skillEntries) {
+      if (seen.has(entry.token)) continue;
+      seen.add(entry.token);
+      merged.push(entry);
+    }
+    all = merged;
+    if (visible) refresh();
+  });
 
   const insert = (token) => {
     textarea.value = token + ' ';

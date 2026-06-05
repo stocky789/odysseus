@@ -118,6 +118,26 @@ class TestProbeEndpointParsing:
         )
         assert _probe_endpoint("https://api.example.com/v1") == []
 
+    def test_chatgpt_subscription_probe_uses_discovery_only(self, monkeypatch):
+        _patch_resolve(monkeypatch)
+        calls = []
+
+        def fake_fetch(access_token, timeout=5):
+            calls.append((access_token, timeout))
+            return ["gpt-5.5"]
+
+        monkeypatch.setattr("src.chatgpt_subscription.fetch_available_models", fake_fetch)
+
+        assert _probe_endpoint("https://chatgpt.com/backend-api/codex", "ACCESS", timeout=7) == ["gpt-5.5"]
+        assert calls == [("ACCESS", 7)]
+
+    def test_chatgpt_subscription_probe_without_discovery_returns_empty(self, monkeypatch):
+        _patch_resolve(monkeypatch)
+        monkeypatch.setattr("src.chatgpt_subscription.fetch_available_models", lambda access_token, timeout=5: [])
+
+        assert _probe_endpoint("https://chatgpt.com/backend-api/codex", "ACCESS") == []
+        assert _probe_endpoint("https://chatgpt.com/backend-api/codex") == []
+
 
 # ── _ping_endpoint: reachability classification ──
 
