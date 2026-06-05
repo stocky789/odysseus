@@ -707,6 +707,57 @@ function initEndpointForm() {
   const pickerBtn = el('adm-provider-btn');
   const pickerMenu = el('adm-provider-menu');
   const pickerCurrent = picker ? picker.querySelector('.adm-provider-current') : null;
+  const CHATGPT_SUBSCRIPTION_PROVIDER_VALUE = 'chatgpt-subscription';
+  let chatgptPolling = false;
+  function _selectedProviderOption() {
+    return provider && provider.selectedOptions ? provider.selectedOptions[0] : null;
+  }
+  function _isChatGPTSubscriptionSelected() {
+    const opt = _selectedProviderOption();
+    return !!opt && (
+      opt.dataset.authFlow === 'chatgpt-subscription'
+      || provider.value === CHATGPT_SUBSCRIPTION_PROVIDER_VALUE
+    );
+  }
+  function _setApiFormForProvider() {
+    const isChatGPT = _isChatGPTSubscriptionSelected();
+    const apiKey = el('adm-epApiKey');
+    const testBtn = el('adm-epApiTestBtn');
+    const addBtn = el('adm-epAddBtn');
+    const status = el('adm-chatgptStatus');
+    const msg = _endpointMsg('api');
+    if (isChatGPT) {
+      urlInput.value = '';
+      urlInput.placeholder = 'ChatGPT Subscription uses OpenAI account sign-in';
+      urlInput.readOnly = true;
+      if (apiKey) {
+        apiKey.value = '';
+        apiKey.placeholder = 'No API key needed';
+        apiKey.disabled = true;
+      }
+      if (testBtn) testBtn.disabled = true;
+      if (addBtn) addBtn.disabled = true;
+      if (kindSel) kindSel.value = 'api';
+      if (msg) {
+        msg.textContent = 'Uses ChatGPT/Codex OAuth, not an OpenAI API key.';
+        msg.className = '';
+      }
+    } else {
+      urlInput.placeholder = 'Base URL or pick provider';
+      urlInput.readOnly = false;
+      if (apiKey) {
+        apiKey.placeholder = 'API key';
+        apiKey.disabled = false;
+      }
+      if (testBtn) testBtn.disabled = false;
+      if (addBtn) addBtn.disabled = false;
+      if (msg) {
+        msg.textContent = '';
+        msg.className = '';
+      }
+      if (!chatgptPolling && status) status.textContent = '';
+    }
+  }
   function _renderPickerMenu() {
     if (!pickerMenu) return;
     pickerMenu.innerHTML = Array.from(provider.options).map(o => {
@@ -748,9 +799,17 @@ function initEndpointForm() {
   }
 
   provider.addEventListener('change', () => {
+    if (_isChatGPTSubscriptionSelected()) {
+      _setApiFormForProvider();
+      _renderPickerMenu();
+      _syncPickerCurrent();
+      _startChatGPTSubscriptionSetup();
+      return;
+    }
     if (provider.value) urlInput.value = provider.value;
     else urlInput.value = '';
     if (kindSel) kindSel.value = provider.value ? 'api' : 'proxy';
+    _setApiFormForProvider();
   });
   urlInput.addEventListener('input', () => {
     if (provider.value && urlInput.value.trim() !== provider.value) {
@@ -838,6 +897,10 @@ function initEndpointForm() {
   const apiCancelTestBtn = el('adm-epApiCancelTestBtn');
   if (apiTestBtn) {
     apiTestBtn.addEventListener('click', async () => {
+      if (_isChatGPTSubscriptionSelected()) {
+        await _startChatGPTSubscriptionSetup();
+        return;
+      }
       const msg = _endpointMsg('api');
       msg.textContent = ''; msg.className = '';
       const rawUrl = (urlInput.value || provider.value).trim();
@@ -885,6 +948,10 @@ function initEndpointForm() {
   }
 
   el('adm-epAddBtn').addEventListener('click', async () => {
+    if (_isChatGPTSubscriptionSelected()) {
+      await _startChatGPTSubscriptionSetup();
+      return;
+    }
     const msg = _endpointMsg('api');
     msg.textContent = ''; msg.className = '';
     const rawUrl = (urlInput.value || provider.value).trim();
@@ -1007,6 +1074,88 @@ function initEndpointForm() {
       setTimeout(poll, stepMs);
     });
   }
+
+  // ChatGPT Subscription — OpenAI account device-flow login. This provisions a
+  // refresh-aware endpoint backed by server-side OAuth tokens, not an API key.
+  async function _startChatGPTSubscriptionSetup(triggerEl = null) {
+    if (chatgptPolling) return;
+    const status = el('adm-chatgptStatus') || _endpointMsg('api');
+    if (!status) return;
+    const triggerText = triggerEl ? triggerEl.textContent : '';
+    const reset = () => {
+      if (triggerEl) {
+        triggerEl.disabled = false;
+        triggerEl.textContent = triggerText || 'ChatGPT Subscription';
+      }
+      chatgptPolling = false;
+      _setApiFormForProvider();
+    };
+    status.textContent = '';
+    status.className = 'adm-ep-inline-msg';
+    if (triggerEl) {
+      triggerEl.disabled = true;
+      triggerEl.textContent = 'Starting...';
+    }
+    chatgptPolling = true;
+    _setApiFormForProvider();
+    status.textContent = 'Starting ChatGPT Subscription sign-in…';
+    let start;
+    try {
+      const res = await fetch('/api/chatgpt-subscription/device/start', { method: 'POST', body: new FormData(), credentials: 'same-origin' });
+      start = await res.json();
+      if (!res.ok) { status.textContent = start.detail || 'Failed to start login'; status.className = 'admin-error'; reset(); return; }
+    } catch (e) { status.textContent = 'Request failed'; status.className = 'admin-error'; reset(); return; }
+
+    const { poll_id, user_code, verification_uri, interval, expires_in } = start;
+    const authUrl = verification_uri || '';
+    const esc = (s) => String(s || '').replace(/[<>&"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
+    if (triggerEl) triggerEl.textContent = 'Waiting…';
+
+    status.className = '';
+    status.innerHTML =
+      '<div class="adm-copilot-panel">' +
+        '<div class="adm-copilot-wait"><span class="admin-spinner"></span>' +
+          '<span>Waiting for ChatGPT authorization…</span></div>' +
+        '<div class="adm-copilot-coderow">' +
+          '<span class="adm-copilot-code-label">Code</span>' +
+          '<code class="adm-copilot-code">' + esc(user_code) + '</code>' +
+          '<button type="button" class="admin-btn-sm adm-chatgpt-copy">Copy</button>' +
+        '</div>' +
+        '<a class="admin-btn-add adm-copilot-auth" href="' + encodeURI(authUrl) + '" target="_blank" rel="noopener">Authorize with OpenAI ↗</a>' +
+        '<div class="adm-copilot-hint">ChatGPT Subscription uses ChatGPT/Codex OAuth, not an OpenAI API key. A new tab opened at OpenAI — enter the code there to finish.</div>' +
+      '</div>';
+    const copyBtn = status.querySelector('.adm-chatgpt-copy');
+    if (copyBtn) copyBtn.addEventListener('click', async () => {
+      try { await navigator.clipboard.writeText(user_code || ''); copyBtn.textContent = 'Copied'; setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1500); } catch (e) {}
+    });
+    try { if (authUrl) window.open(authUrl, '_blank', 'noopener'); } catch (e) {}
+
+    const deadline = Date.now() + (expires_in || 900) * 1000;
+    const stepMs = Math.max((interval || 5), 2) * 1000;
+    const done = (cls, text) => { status.className = cls; status.textContent = text; reset(); };
+    const poll = async () => {
+      if (Date.now() > deadline) { done('admin-error', 'Authorization expired — try again.'); return; }
+      try {
+        const fd = new FormData(); fd.append('poll_id', poll_id);
+        const r = await fetch('/api/chatgpt-subscription/device/poll', { method: 'POST', body: fd, credentials: 'same-origin' });
+        const d = await r.json();
+        if (d.status === 'authorized') {
+          const n = ((d.endpoint && d.endpoint.models) || []).length;
+          done('admin-success', '✓ Connected — ' + n + ' ChatGPT model' + (n !== 1 ? 's' : '') + ' available.');
+          if (d.endpoint && d.endpoint.id) _recentlyAddedEpId = String(d.endpoint.id);
+          await loadEndpoints();
+          await _selectAddedModelInChat(d.endpoint || {});
+          return;
+        }
+        if (d.status === 'failed') { done('admin-error', 'Authorization failed (' + (d.error || 'denied') + ').'); return; }
+      } catch (e) { /* transient — keep polling */ }
+      setTimeout(poll, stepMs);
+    };
+    setTimeout(poll, stepMs);
+  }
+
+  const chatgptBtn = el('adm-chatgptConnectBtn');
+  if (chatgptBtn) chatgptBtn.addEventListener('click', () => _startChatGPTSubscriptionSetup(chatgptBtn));
 
   // Local "Add" button — sibling form for self-hosted base URLs.
   const localAddBtn = el('adm-epLocalAddBtn');

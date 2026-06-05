@@ -283,6 +283,7 @@ _HOST_TO_CURATED = (
     ("fireworks.ai", "fireworks"),
     ("googleapis.com", "google"),
     ("x.ai", "xai"),
+
     ("openrouter.ai", "openrouter"),
     ("ollama.com", "ollama"),
     ("opencode.ai/zen/go", "opencode-go"),
@@ -493,6 +494,8 @@ _NON_CHAT_EXACT_PREFIXES = (
 def _is_chat_model(model_id: str) -> bool:
     """Return True if the model ID looks like a chat/completions-capable model."""
     mid = model_id.lower()
+    if mid in {"gpt-5.1-codex"}:
+        return True
     for prefix in _NON_CHAT_PREFIXES:
         if mid.startswith(prefix):
             return False
@@ -621,6 +624,11 @@ def _probe_endpoint(base_url: str, api_key: str = None, timeout: int = 5) -> Lis
     For Anthropic, queries their /v1/models API, falling back to hardcoded list."""
     from src.endpoint_resolver import resolve_url
     base = resolve_url(_normalize_base(base_url))
+    if _detect_provider(base) == "chatgpt-subscription":
+        from src.chatgpt_subscription import fetch_available_models
+        if api_key:
+            return fetch_available_models(api_key, timeout=timeout)
+        return []
     if _detect_provider(base) == "anthropic":
         # Try Anthropic's /v1/models endpoint first
         url = build_models_url(base)
@@ -647,6 +655,10 @@ def _probe_endpoint(base_url: str, api_key: str = None, timeout: int = 5) -> Lis
             logger.warning(f"Anthropic /v1/models failed, using hardcoded list: {e}")
         return list(ANTHROPIC_MODELS)
     url = build_models_url(base)
+    if not url:
+        curated_key = _match_provider_curated(base, None)
+        fallback = _PROVIDER_CURATED.get(curated_key) if curated_key else None
+        return list(fallback or [])
     headers = build_headers(api_key, base)
     try:
         r = httpx.get(url, headers=headers, timeout=timeout, verify=llm_verify())
@@ -998,6 +1010,17 @@ def setup_model_routes(model_discovery):
                         ok, info = _should_refresh_endpoint(ep, now, force=force)
                         if not ok:
                             continue
+                        if getattr(ep, "provider_auth_id", None):
+                            try:
+                                from src.endpoint_resolver import resolve_endpoint_runtime
+                                info["base"], info["api_key"] = resolve_endpoint_runtime(
+                                    ep,
+                                    owner=getattr(ep, "owner", None),
+                                )
+                                info["key"] = _refresh_key(info["base"], info["api_key"])
+                            except Exception as e:
+                                logger.warning("Skipping model refresh for %s: could not resolve provider auth: %s", getattr(ep, "name", ep.id), e)
+                                continue
                         groups.setdefault(info["key"], {
                             "base": info["base"],
                             "api_key": info["api_key"],

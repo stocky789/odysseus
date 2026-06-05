@@ -102,6 +102,7 @@ export function providerLogo(modelId) {
 // doesn't match `x.ai`.
 const _ENDPOINT_LABELS = [
   [/(^|\.)githubcopilot\.com$/i, "GitHub Copilot"],
+  [/(^|\.)chatgpt\.com$/i, "ChatGPT Subscription"],
   [/(^|\.)openrouter\.ai$/i, "OpenRouter"],
   [/(^|\.)anthropic\.com$/i, "Anthropic"],
   [/(^|\.)openai\.com$/i, "OpenAI"],

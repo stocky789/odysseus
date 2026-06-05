@@ -286,6 +286,53 @@ function slashReply(text) {
   return { el: div, body };
 }
 
+let _skillCatalogCache = { at: 0, items: [] };
+
+async function _loadSkillSlashCatalog(force = false) {
+  const now = Date.now();
+  if (!force && (now - _skillCatalogCache.at) < 15000) return _skillCatalogCache.items;
+  try {
+    const res = await fetch(`${API_BASE}/api/skills/slash-catalog`, { credentials: 'same-origin' });
+    if (!res.ok) throw new Error('catalog unavailable');
+    const data = await res.json();
+    const items = Array.isArray(data.skills) ? data.skills : [];
+    _skillCatalogCache = { at: now, items };
+    return items;
+  } catch {
+    return _skillCatalogCache.items || [];
+  }
+}
+
+function _submitComposedMessage(text) {
+  const msgInput = document.getElementById('message');
+  const form = document.getElementById('chat-form');
+  if (!msgInput || !form) return false;
+  msgInput.value = text;
+  msgInput.dispatchEvent(new Event('input', { bubbles: true }));
+  if (typeof form.requestSubmit === 'function') form.requestSubmit();
+  else form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+  return true;
+}
+
+async function _invokeSkillByName(name, requestText, ctx) {
+  const res = await fetch(`${API_BASE}/api/skills/${encodeURIComponent(name)}/invoke`, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ request: requestText || '' })
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => null);
+    slashReply(ctx?.esc ? ctx.esc(err?.detail || 'Skill is not available') : 'Skill is not available');
+    return true;
+  }
+  const data = await res.json();
+  if (!data.message || !_submitComposedMessage(data.message)) {
+    slashReply('Could not start skill invocation.');
+  }
+  return true;
+}
+
 /** Minimal footer for slash replies: copy + dismiss */
 function _slashFooter(msgEl) {
   const footer = document.createElement('div');
@@ -1429,6 +1476,42 @@ async function _cmdModels(args, ctx) {
   return true;
 }
 
+async function _cmdModel(args, ctx) {
+  const sub = (args[0] || '').toLowerCase();
+  if (sub === 'list' || sub === 'ls') return _cmdModels(args.slice(1), ctx);
+
+  const model = sessionModule.getCurrentModel ? sessionModule.getCurrentModel() : '';
+  const endpoint = sessionModule.getCurrentEndpointUrl ? sessionModule.getCurrentEndpointUrl() : '';
+  slashReply(`<pre>${[
+    `Current model: ${ctx.esc(model || 'None selected')}`,
+    endpoint ? `Endpoint: ${ctx.esc(endpoint)}` : 'Endpoint: not available',
+    '',
+    'Usage: /model list to show all available models'
+  ].join('\n')}</pre>`);
+  return true;
+}
+
+async function _cmdMcp(args, ctx) {
+  const res = await fetch(`${API_BASE}/api/mcp/servers`, { credentials: 'same-origin' });
+  if (!res.ok) {
+    slashReply('MCP status is unavailable for this user.');
+    return true;
+  }
+  const servers = await res.json();
+  if (!Array.isArray(servers) || !servers.length) {
+    slashReply('No MCP servers configured.');
+    return true;
+  }
+  const lines = servers.map(s => {
+    const status = s.status || (s.is_enabled ? 'enabled' : 'disabled');
+    const enabled = Number(s.enabled_tool_count ?? s.tool_count ?? 0);
+    const total = Number(s.tool_count ?? enabled);
+    return `${s.name || s.id || 'MCP server'} - ${status} (${enabled}/${total} tools)`;
+  });
+  slashReply(`<pre>${lines.map(line => ctx.esc(line)).join('\n')}</pre>`);
+  return true;
+}
+
 // ── Memory ──
 
 async function _cmdMemoryList(args, ctx) {
@@ -1504,6 +1587,73 @@ async function _cmdMemorySearch(args, ctx) {
   if (!mems.length) { await typewriterReply(`No memories matching "${ctx.esc(query)}"`); return true; }
   const lines = mems.map(m => `[${m.category||'fact'}] ${ctx.esc(m.text)}`);
   slashReply(`<pre>${lines.join('\n')}</pre>`);
+  return true;
+}
+
+// ── Skills ──
+
+async function _cmdSkills(args, ctx) {
+  const sub = (args[0] || 'list').toLowerCase();
+  const rest = args.slice(1);
+
+  if (sub === 'list' || sub === 'ls') {
+    const skills = await _loadSkillSlashCatalog(true);
+    if (!skills.length) {
+      slashReply('No published skills available for slash commands.');
+      return true;
+    }
+    const lines = skills.map(s => {
+      const uses = Number(s.uses || 0);
+      const useText = uses > 0 ? `  uses:${uses}` : '';
+      return `${ctx.esc(String(s.token || '').padEnd(24))}${ctx.esc(s.help || '')}${useText}`;
+    });
+    slashReply(`<pre>${lines.join('\n')}</pre>`);
+    return true;
+  }
+
+  if (sub === 'search' || sub === 'find') {
+    const query = rest.join(' ').trim();
+    if (!query) { slashReply('Usage: /skills search query'); return true; }
+    const res = await fetch(`${API_BASE}/api/skills/search`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query })
+    });
+    if (!res.ok) { slashReply('Skill search failed.'); return true; }
+    const data = await res.json();
+    const skills = Array.isArray(data.skills) ? data.skills : [];
+    if (!skills.length) { slashReply(`No skills found for "${ctx.esc(query)}".`); return true; }
+    const lines = skills.map(s =>
+      ctx.esc(`/${s.name || s.id || ''}`.padEnd(24)) + ctx.esc(s.description || '')
+    );
+    slashReply(`<pre>${lines.join('\n')}</pre>`);
+    return true;
+  }
+
+  if (sub === 'view' || sub === 'cat' || sub === 'show') {
+    const name = (rest[0] || '').trim();
+    if (!name) { slashReply('Usage: /skills view name'); return true; }
+    const res = await fetch(`${API_BASE}/api/skills/${encodeURIComponent(name)}/markdown`, { credentials: 'same-origin' });
+    if (!res.ok) { slashReply(`Skill "${ctx.esc(name)}" was not found.`); return true; }
+    const data = await res.json();
+    slashReply(`<pre>${ctx.esc(data.markdown || '')}</pre>`);
+    return true;
+  }
+
+  if (sub === 'use' || sub === 'run') {
+    const name = (rest[0] || '').trim();
+    if (!name) { slashReply('Usage: /skills use name request'); return true; }
+    return _invokeSkillByName(name, rest.slice(1).join(' ').trim(), ctx);
+  }
+
+  slashReply('Usage: /skills list | search query | view name | use name request');
+  return true;
+}
+
+async function _cmdReloadSkills(args, ctx) {
+  const skills = await _loadSkillSlashCatalog(true);
+  slashReply(`Reloaded skills. ${skills.length} skill command${skills.length === 1 ? '' : 's'} available.`);
   return true;
 }
 
@@ -1796,6 +1946,53 @@ Memories:  ${d.memories || '?'}
 Documents: ${d.documents || '?'}
 Uploads:   ${d.uploads || '?'}</pre>`);
   } else { slashReply('Failed to fetch stats'); }
+  return true;
+}
+
+async function _cmdUsage(args, ctx) {
+  const sid = ctx.sid;
+  if (!sid) {
+    slashReply('No active session.');
+    return true;
+  }
+
+  let session = null;
+  try {
+    const sessions = sessionModule.getSessions ? sessionModule.getSessions() : [];
+    session = (sessions || []).find(s => s.id === sid) || null;
+    if (!session) {
+      const res = await fetch(`${API_BASE}/api/sessions`, { credentials: 'same-origin' });
+      if (res.ok) {
+        const data = await res.json();
+        const items = Array.isArray(data) ? data : (data.sessions || data.items || []);
+        session = items.find(s => s.id === sid) || null;
+      }
+    }
+  } catch (_) {}
+
+  const model = session?.model || 'Unknown';
+  const endpointUrl = session?.endpoint_url || (
+    sessionModule.getCurrentEndpointUrl ? sessionModule.getCurrentEndpointUrl() : ''
+  );
+  const messageCount = Number(session?.message_count || 0);
+  const totalTokens = Number(session?.total_tokens || 0);
+  const costTracked = chatRenderer.isCostTrackedEndpoint ? chatRenderer.isCostTrackedEndpoint(endpointUrl) : true;
+  const cost = costTracked && chatRenderer.getSessionCost ? Number(chatRenderer.getSessionCost(sid) || 0) : 0;
+  const costLine = costTracked
+    ? (cost > 0
+      ? `Estimated local cost: $${cost < 0.01 ? cost.toFixed(4) : cost.toFixed(3)}`
+      : 'Estimated local cost: unavailable or zero')
+    : 'Estimated local cost: not tracked for this endpoint';
+
+  slashReply(`<pre>${[
+    `Session: ${ctx.esc(session?.name || 'Current chat')}`,
+    `Model: ${ctx.esc(model)}`,
+    `Messages: ${messageCount.toLocaleString()}`,
+    `Recorded tokens: ${totalTokens.toLocaleString()}`,
+    costLine,
+    '',
+    'Provider account usage is not available from here; check the provider dashboard for account quota/billing.'
+  ].join('\n')}</pre>`);
   return true;
 }
 
@@ -4818,12 +5015,48 @@ async function _setupCopilot() {
   setTimeout(poll, stepMs);
 }
 
+async function _setupChatGPTSubscription() {
+  _clearSetupGuideMessages();
+  await _setupReply('Starting ChatGPT Subscription sign-in…');
+  let start;
+  try {
+    const r = await fetch(`${API_BASE}/api/chatgpt-subscription/device/start`, { method: 'POST', body: new FormData(), credentials: 'same-origin' });
+    start = await r.json();
+    if (!r.ok) { await _setupReply(start.detail || 'Failed to start ChatGPT Subscription sign-in.'); return; }
+  } catch (e) { await _setupReply('Request failed.'); return; }
+  const authUrl = start.verification_uri || '';
+  await _setupReply(`Opening OpenAI — enter code ${start.user_code}. Waiting…`);
+  try { if (authUrl) window.open(authUrl, '_blank', 'noopener'); } catch (e) {}
+  const deadline = Date.now() + (start.expires_in || 900) * 1000;
+  const stepMs = Math.max((start.interval || 5), 2) * 1000;
+  const poll = async () => {
+    if (Date.now() > deadline) { await _setupReply('ChatGPT Subscription sign-in expired — run /setup chatgpt-subscription again.'); return; }
+    try {
+      const fd = new FormData(); fd.append('poll_id', start.poll_id);
+      const r = await fetch(`${API_BASE}/api/chatgpt-subscription/device/poll`, { method: 'POST', body: fd, credentials: 'same-origin' });
+      const d = await r.json();
+      if (d.status === 'authorized') {
+        const n = ((d.endpoint && d.endpoint.models) || []).length;
+        await _setupReply(`Connected — ${n} ChatGPT Subscription model${n !== 1 ? 's' : ''} available.`);
+        if (modelsModule) modelsModule.refreshModels(true);
+        return;
+      }
+      if (d.status === 'failed') { await _setupReply('ChatGPT Subscription sign-in failed (' + (d.error || 'denied') + ').'); return; }
+    } catch (e) { /* transient — keep polling */ }
+    setTimeout(poll, stepMs);
+  };
+  setTimeout(poll, stepMs);
+}
+
 async function _cmdSetup(args, ctx) {
   _hideWelcomeScreen();
   _clearSetupCommandInput();
   const topic = (args[0] || '').trim().toLowerCase();
   const topicArgs = args.slice(1);
   if (topic === 'copilot' || topic === 'github') { await _setupCopilot(); return true; }
+  if (topic === 'chatgpt-subscription' || topic === 'chatgptsubscription' || topic === 'chatgpt-sub' || topic === 'codex') {
+    await _setupChatGPTSubscription(); return true;
+  }
   const provider = _setupProviderFromInput(topic);
   if (provider) {
     _clearSetupGuideMessages();
@@ -5463,8 +5696,20 @@ async function _cmdHelp(args, ctx) {
       lines.push('');
     }
   }
+  const skillCommands = await _loadSkillSlashCatalog(false);
+  if (skillCommands.length) {
+    lines.push('Skills:');
+    for (const skill of skillCommands.slice(0, 20)) {
+      const token = String(skill.token || '').padEnd(21);
+      lines.push(`  ${ctx.esc(token)}${ctx.esc(skill.help || '')}`);
+    }
+    if (skillCommands.length > 20) {
+      lines.push(`  ... ${skillCommands.length - 20} more. Use /skills list`);
+    }
+    lines.push('');
+  }
   lines.push('Tip: /<command> --help for details');
-  lines.push('Shortcuts: /new /rename /fork /web /bash /memories /forget');
+  lines.push('Shortcuts: /new /rename /fork /web /bash /memories /skills');
   slashReply(`<pre style="line-height:1.7">${lines.join('\n')}</pre>`);
   return true;
 }
@@ -5539,6 +5784,20 @@ const COMMANDS = {
       'search': { handler: _cmdMemorySearch, alias: ['grep'],        help: 'Search memories',     usage: '/memory search q' }
     }
   },
+  skills: {
+    alias: ['skill'],
+    category: 'Memory',
+    help: 'List, search, inspect, or run skills',
+    handler: _cmdSkills,
+    usage: '/skills list | search query | view name | use name request',
+  },
+  'reload-skills': {
+    alias: ['reload_skills'],
+    category: 'Memory',
+    help: 'Refresh the slash skill catalog',
+    handler: _cmdReloadSkills,
+    usage: '/reload-skills',
+  },
   rag: {
     alias: [],
     category: 'RAG',
@@ -5572,7 +5831,7 @@ const COMMANDS = {
     category: 'Getting started',
     help: 'Add local or API model endpoints',
     handler: _cmdSetup,
-    usage: '/setup local URL  ·  /setup groq KEY  ·  /setup copilot  ·  /setup endpoint',
+    usage: '/setup local URL  ·  /setup groq KEY  ·  /setup copilot  ·  /setup chatgpt-subscription',
     // Provider subs so the autocomplete popup surfaces "/setup deepseek",
     // "/setup openai", etc. when the user types "/setup de". Each sub's
     // handler is a thin wrapper that re-prepends the sub name and
@@ -5590,6 +5849,7 @@ const COMMANDS = {
       xai:        { help: 'xAI (Grok)',    alias: ['grok'],   usage: '/setup xai xai-...',   handler: (a, c) => _cmdSetup(['xai',    ...a], c) },
       ollama:     { help: 'Ollama Cloud',  usage: '/setup ollama KEY',          handler: (a, c) => _cmdSetup(['ollama',     ...a], c) },
       copilot:    { help: 'GitHub Copilot', usage: '/setup copilot',            handler: (a, c) => _cmdSetup(['copilot',    ...a], c) },
+      'chatgpt-subscription': { help: 'ChatGPT Subscription', alias: ['codex'], usage: '/setup chatgpt-subscription', handler: (a, c) => _cmdSetup(['chatgpt-subscription', ...a], c) },
       local:      { help: 'Local model server (vLLM / LM Studio / llama.cpp / Ollama)',
                     usage: '/setup local http://localhost:8000/v1',
                     handler: (a, c) => _cmdSetup(['local', ...a], c) },
@@ -5767,8 +6027,22 @@ const COMMANDS = {
     handler: (args, ctx) => _cmdToolPanel('compare', args, ctx),
     usage: '/compare'
   },
+  mcp: {
+    alias: [],
+    category: 'Tools',
+    help: 'Show MCP server status',
+    handler: _cmdMcp,
+    usage: '/mcp'
+  },
+  model: {
+    alias: [],
+    category: 'Settings',
+    help: 'Show current chat model',
+    handler: _cmdModel,
+    usage: '/model  ·  /model list'
+  },
   models: {
-    alias: ['model'],
+    alias: [],
     category: 'Settings',
     help: 'List available models',
     handler: _cmdModels,
@@ -5799,10 +6073,16 @@ const COMMANDS = {
     handler: _cmdStats,
     usage: '/stats'
   },
+  usage: {
+    alias: ['cost', 'tokens'],
+    category: 'Utility',
+    help: 'Show local usage for the current chat',
+    handler: _cmdUsage,
+    usage: '/usage'
+  },
   compact: {
     alias: [],
     category: 'Utility',
-    hidden: true,
     help: 'Compact older chat messages',
     handler: _cmdCompact,
     usage: '/compact'
@@ -6075,33 +6355,13 @@ async function handleSlashCommand(input) {
     }
 
     // --- 4. Skill invocation: /<skill-name> [request] ---
-    // If `rawCmd` matches a published skill, pin its SKILL.md to the user's
-    // message and re-submit. Lets you fire a stored procedure on demand
-    // without the model having to discover the skill itself.
+    // If `rawCmd` matches a published skill, the backend records usage and
+    // returns a skill-pinned message to submit as the next agent turn.
     try {
-      const skillRes = await fetch(`${API_BASE}/api/skills/${encodeURIComponent(rawCmd)}/markdown`, { credentials: 'same-origin' });
-      if (skillRes.ok) {
-        const skillData = await skillRes.json();
-        const md = skillData.markdown || '';
-        if (md) {
-          _showUser();
-          const request = args.join(' ').trim();
-          const msgInput = document.getElementById('message');
-          const composed =
-            `Apply the skill below to my request, following its Procedure / Pitfalls / Verification.\n\n` +
-            `--- BEGIN SKILL ---\n${md}\n--- END SKILL ---\n\n` +
-            (request ? `Request: ${request}` : `Request: (use the skill as appropriate)`);
-          if (msgInput) {
-            msgInput.value = composed;
-            const form = document.getElementById('chat-form');
-            if (form && typeof form.requestSubmit === 'function') {
-              form.requestSubmit();
-            } else if (form) {
-              form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
-            }
-          }
-          return true;
-        }
+      const catalog = await _loadSkillSlashCatalog(false);
+      if (catalog.some(s => s.name === rawCmd)) {
+        _showUser();
+        return await _invokeSkillByName(rawCmd, args.join(' ').trim(), ctx);
       }
     } catch (_) { /* fall through to fuzzy match */ }
 
