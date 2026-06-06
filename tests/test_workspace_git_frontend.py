@@ -667,3 +667,47 @@ def test_lane_layout_caps_lane_count():
     assert 'MAX_LANES' in src, 'lane allocator must define a MAX_LANES cap'
     idx = src.find('MAX_LANES')
     assert '8' in src[idx:idx + 40], 'MAX_LANES should be 8 (overflow folds into the last lane)'
+
+
+def test_history_renders_svg_rail():
+    src = read('static/js/workspaceGit.js')
+    assert 'wgit-graph' in src, 'history rows need a graph gutter'
+    assert 'wgit-graph-svg' in src, 'continuous SVG rail missing'
+    assert 'aria-hidden' in src, 'decorative rail must be aria-hidden'
+
+
+def test_history_renders_typed_ref_chips():
+    src = read('static/js/workspaceGit.js')
+    assert 'wgit-ref' in src, 'ref chips missing'
+    for cls in ('wgit-ref-head', 'wgit-ref-local', 'wgit-ref-remote', 'wgit-ref-tag'):
+        assert cls in src, f'ref chip type {cls} missing'
+
+
+def test_history_row_hooks_survive_restructure():
+    src = read('static/js/workspaceGit.js')
+    for hook in ('wgit-history-list', 'wgit-scope', 'selectedPath',
+                 'wgit-commit-row', 'wgit-commit-subject', 'wgit-commit-meta',
+                 'wgit-commit-sha', 'wgit-commit-author', 'wgit-commit-date'):
+        assert hook in src, f'{hook} must survive the row restructure'
+
+
+def test_history_fixed_row_height_token():
+    css = read('static/style.css')
+    assert '--wgit-row-h' in css, 'fixed row-height token missing (node Y math needs it)'
+
+
+def test_history_lane_palette_themed_both_modes():
+    css = read('static/style.css')
+    for n in range(8):
+        assert f'--wgit-lane-{n}' in css, f'lane color --wgit-lane-{n} missing'
+    # Defined for dark + light so the rail themes through CSS, not getComputedStyle.
+    assert css.count('--wgit-lane-0:') >= 2, 'lane palette must be defined for both themes'
+
+
+def test_history_graph_node_and_chip_css():
+    css = read('static/style.css')
+    assert '.wgit-graph-svg' in css, 'graph svg styles missing'
+    assert '.wgit-lane-0' in css, 'lane color class missing'
+    assert '.wgit-node' in css, 'node styles missing'
+    assert 'wgit-node-head' in css, 'HEAD node ring missing'
+    assert '.wgit-ref' in css, 'ref chip styles missing'

@@ -1545,6 +1545,75 @@ function _computeGraph(commits) {
   return { nodes, segments, usedLanes };
 }
 
+// ── Commit graph: SVG rail ──────────────────────────────────────────────────
+// Geometry only; all color comes from the .wgit-lane-{n} classes so the rail
+// re-themes on the light/dark flip with no JS. The SVG is decorative
+// (aria-hidden) — meaning lives in the text rows, which stay keyboard-operable.
+const SVG_NS = 'http://www.w3.org/2000/svg';
+const LANE_W = 14;       // horizontal distance between lane centers (px)
+const GRAPH_LEFT = 10;   // x of lane 0's center
+const NODE_R = 3.5;
+const HEAD_RING_R = 6;   // outer ring drawn around the current-HEAD node
+
+function _svgEl(tag, attrs = {}, children = []) {
+  const el = document.createElementNS(SVG_NS, tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (v === null || v === undefined || v === false) continue;
+    el.setAttribute(k, v === true ? '' : String(v));
+  }
+  for (const c of [].concat(children)) if (c) el.appendChild(c);
+  return el;
+}
+
+function _laneX(lane) { return GRAPH_LEFT + lane * LANE_W; }
+function _graphGutter(usedLanes) { return _laneX(usedLanes - 1) + LANE_W; }
+
+function _buildGraphSvg(graph, rowH) {
+  const width = _graphGutter(graph.usedLanes);
+  const height = graph.nodes.length * rowH;
+  const svg = _svgEl('svg', {
+    class: 'wgit-graph-svg', 'aria-hidden': 'true',
+    width, height, viewBox: `0 0 ${width} ${height}`, preserveAspectRatio: 'xMinYMin meet',
+  });
+  // Edges first so the round nodes sit on top of the lines.
+  for (const s of graph.segments) {
+    const x1 = _laneX(s.topLane);
+    const x2 = _laneX(s.bottomLane);
+    const y1 = s.row * rowH + rowH / 2;
+    const y2 = (s.row + 1) * rowH + rowH / 2;
+    const ym = (y1 + y2) / 2;
+    const d = x1 === x2
+      ? `M${x1} ${y1} L${x2} ${y2}`
+      : `M${x1} ${y1} C${x1} ${ym} ${x2} ${ym} ${x2} ${y2}`;
+    svg.appendChild(_svgEl('path', { class: `wgit-edge wgit-lane-${s.colorIndex}`, d }));
+  }
+  for (const n of graph.nodes) {
+    const cx = _laneX(n.lane);
+    const cy = n.row * rowH + rowH / 2;
+    if (n.isHead) svg.appendChild(_svgEl('circle', { class: `wgit-node-head wgit-lane-${n.colorIndex}`, cx, cy, r: HEAD_RING_R }));
+    svg.appendChild(_svgEl('circle', { class: `wgit-node wgit-lane-${n.colorIndex}`, cx, cy, r: NODE_R }));
+  }
+  return svg;
+}
+
+// Typed branch/remote/tag chips rendered before the subject. Restrained,
+// extends the existing badge vocabulary; the full ref name is on `title`.
+const _REF_CLASS = {
+  head: 'wgit-ref-head',
+  tag: 'wgit-ref-tag',
+  remote: 'wgit-ref-remote',
+  local: 'wgit-ref-local',
+};
+function _refChips(refs) {
+  return (refs || []).map((ref) => {
+    const typeClass = _REF_CLASS[ref.type] || _REF_CLASS.local;
+    return _h('span', {
+      class: `wgit-ref ${typeClass}${ref.current ? ' is-current' : ''}`,
+      title: ref.name, text: ref.name,
+    });
+  });
+}
+
 function _renderHistory(panel) {
   panel.innerHTML = '';
   const path = _historyPath();
@@ -1587,18 +1656,31 @@ async function _loadHistory(path) {
   }
   if (_historyPath() !== path) return; // superseded by a newer scope/selection
   list.innerHTML = '';
+  list.style.removeProperty('--wgit-graph-gutter');
   const commits = data.commits || [];
   if (!commits.length) {
     list.appendChild(_h('div', { class: 'wgit-file-loading', text: 'No commits yet.' }));
     return;
   }
+
+  // Lay the lanes out, reserve a gutter the rows indent past, and paint one
+  // continuous rail behind them. Row height is the single source of truth for
+  // node Y math — read it from CSS so density/theme overrides stay honored.
+  const graph = _computeGraph(commits);
+  const rowH = parseFloat(getComputedStyle(list).getPropertyValue('--wgit-row-h')) || 42;
+  list.style.setProperty('--wgit-graph-gutter', `${_graphGutter(graph.usedLanes)}px`);
+  list.appendChild(_buildGraphSvg(graph, rowH));
+
   commits.forEach((c) => {
     const row = _h('div', {
       class: `wgit-commit-row${_selectedCommit && _selectedCommit.sha === c.sha ? ' is-selected' : ''}`,
       dataset: { sha: c.sha },
       onActivate: () => _showCommitDetail(c),
     }, [
-      _h('div', { class: 'wgit-commit-subject', title: c.message, text: c.message || '(no message)' }),
+      _h('div', { class: 'wgit-commit-line' }, [
+        ..._refChips(c.refs),
+        _h('span', { class: 'wgit-commit-subject', title: c.message, text: c.message || '(no message)' }),
+      ]),
       _h('div', { class: 'wgit-commit-meta' }, [
         _h('span', { class: 'wgit-commit-sha', text: _shortSha(c.sha) }),
         _h('span', { class: 'wgit-commit-author', text: c.author || '' }),
