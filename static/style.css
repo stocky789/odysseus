@@ -37110,6 +37110,7 @@ body.theme-frosted .modal {
   align-items: center;
   gap: 5px;
   min-width: 0;
+  overflow: hidden;            /* many ref chips clip rather than spill into meta */
 }
 .wgit-commit-subject {
   font-size: 12.5px;

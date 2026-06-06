@@ -1757,7 +1757,7 @@ async function _loadCommitFiles(commit, container) {
   container.append(
     _h('div', { class: 'wgit-commit-summary' }, [
       _h('span', { class: 'wgit-commit-summary-count', text: count === 1 ? '1 file changed' : `${count} files changed` }),
-      _statPair(detail.additions ?? 0, detail.deletions ?? 0, 'wgit-commit-summary-stat'),
+      _statPair(detail.additions || 0, detail.deletions || 0, 'wgit-commit-summary-stat'),
     ]),
     files.length
       ? _h('div', { class: 'wgit-commit-filelist' }, files.map((f) => _h('div', {
