@@ -761,29 +761,6 @@ def git_create_branch(workspace: str, branch: str) -> dict[str, Any]:
     return {"ok": True, "branch": branch, "created": True}
 
 
-def git_create_branch(workspace: str, branch: str) -> dict[str, Any]:
-    """Create a new branch and switch to it. `git checkout -b` carries any
-    uncommitted changes onto the new branch (normal git behaviour), so no stash
-    is needed here. Rejects unsafe/duplicate names with a clean error."""
-    ctx = repo_context(workspace)
-    _require_repo_root_workspace(ctx)
-    branch = (branch or "").strip()
-    if not branch:
-        raise GitWorkspaceError("git_failed", "branch name is required")
-    # Reject leading '-' (option injection) before any name reaches git.
-    if branch.startswith("-"):
-        raise GitWorkspaceError("git_failed", f"invalid branch name: {branch}")
-    if git_run(ctx.repo_root, ["check-ref-format", "--branch", branch], check=False).returncode != 0:
-        raise GitWorkspaceError("git_failed", f"invalid branch name: {branch}")
-    with _mutation_lock(ctx.repo_root):
-        _reject_unsafe_git_config(ctx.repo_root)
-        exists = git_run(ctx.repo_root, ["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"], check=False)
-        if exists.returncode == 0:
-            raise GitWorkspaceError("git_failed", f"branch already exists: {branch}")
-        git_run(ctx.repo_root, ["checkout", "-b", branch])
-    return {"ok": True, "branch": branch, "created": True}
-
-
 def git_remote_action(workspace: str, action: str) -> dict[str, Any]:
     if action not in {"fetch", "pull", "push"}:
         raise GitWorkspaceError("git_failed", "unknown remote action")

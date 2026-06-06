@@ -743,12 +743,12 @@ function _renderDiff(pane, data, path, staged) {
 function _renderHunk(hunk, path, staged) {
   const headBtn = staged
     ? _h('button', {
-        type: 'button', class: 'wgit-hunk-btn wgit-hunk-unstage', text: 'Unstage hunk',
-        onclick: () => _unstageHunk(path, hunk.id),
+        type: 'button', class: 'wgit-hunk-btn wgit-hunk-unstage', text: 'Unstage',
+        title: 'Unstage this hunk', onclick: () => _unstageHunk(path, hunk.id),
       })
     : _h('button', {
-        type: 'button', class: 'wgit-hunk-btn wgit-hunk-stage', text: 'Stage hunk',
-        onclick: () => _stageHunk(path, hunk.id),
+        type: 'button', class: 'wgit-hunk-btn wgit-hunk-stage', text: 'Stage',
+        title: 'Stage this hunk', onclick: () => _stageHunk(path, hunk.id),
       });
   const head = _h('div', { class: 'wgit-hunk-head' }, [
     _h('span', { class: 'wgit-hunk-header', text: hunk.header }),
@@ -1467,6 +1467,153 @@ function _historyPath() {
   return state.selectedPath || null; // 'auto' and 'file' both follow selection
 }
 
+// ── Commit graph: lane layout ───────────────────────────────────────────────
+// A bounded multi-lane DAG. Lanes are reused as branches end; the count is
+// capped so a pathological repo can never blow out the gutter — overflow folds
+// into the last lane. Pure data in, pure data out: no DOM and no theme
+// knowledge (colors are applied later via .wgit-lane-{n} classes in CSS).
+const MAX_LANES = 8;
+const LANE_COLORS = 8; // palette size; colorIndex = lane % LANE_COLORS
+
+function _firstFreeLane(lanes) {
+  for (let i = 0; i < lanes.length; i++) if (lanes[i] == null) return i;
+  if (lanes.length < MAX_LANES) return lanes.length;
+  return MAX_LANES - 1; // cap reached: fold overflow into the last lane
+}
+
+// Allocate a lane per commit (newest-first) and emit the inter-row edge
+// segments needed to draw the rail. Returns { nodes, segments, usedLanes }:
+//   nodes:    [{ row, lane, colorIndex, sha, isHead }]
+//   segments: [{ row, topLane, bottomLane, colorIndex }]  (row = gap below `row`)
+function _computeGraph(commits) {
+  const lanes = [];        // frontier: lanes[k] = sha that lane k expects next
+  const nodes = [];
+  const frontiers = [];    // per row: active lanes in the gap below it
+
+  commits.forEach((commit, row) => {
+    const parents = commit.parents || [];
+    let myLane = lanes.indexOf(commit.sha);
+    if (myLane === -1) myLane = _firstFreeLane(lanes);
+    lanes[myLane] = null;  // resolved at this row
+
+    // Multi-child merge: free any *other* lane that was also waiting for us.
+    for (let k = 0; k < lanes.length; k++) {
+      if (k !== myLane && lanes[k] === commit.sha) lanes[k] = null;
+    }
+
+    // First parent keeps this lane; extra (merge) parents take other lanes.
+    const parentLanes = [];
+    parents.forEach((parentSha, idx) => {
+      let pLane = myLane;
+      if (idx > 0) {
+        pLane = lanes.indexOf(parentSha);
+        if (pLane === -1) pLane = _firstFreeLane(lanes);
+      }
+      lanes[pLane] = parentSha;
+      parentLanes.push(pLane);
+    });
+
+    const isHead = (commit.refs || []).some((r) => r.type === 'head' && r.current);
+    nodes.push({ row, lane: myLane, colorIndex: myLane % LANE_COLORS, sha: commit.sha, isHead });
+
+    const snap = [];
+    for (let k = 0; k < lanes.length; k++) {
+      if (lanes[k] == null) continue;
+      snap.push({ lane: k, sha: lanes[k], fromNode: (k === myLane) || parentLanes.includes(k) });
+    }
+    frontiers.push(snap);
+  });
+
+  // Second pass: with both gap endpoints known, route each lane's segment —
+  // straight where it passes through, bending into a node where it converges.
+  const segments = [];
+  for (let i = 0; i < frontiers.length; i++) {
+    const next = commits[i + 1];
+    for (const entry of frontiers[i]) {
+      const topLane = entry.fromNode ? nodes[i].lane : entry.lane;
+      let bottomLane = entry.lane;
+      if (next && next.sha === entry.sha && nodes[i + 1].lane !== entry.lane) {
+        bottomLane = nodes[i + 1].lane; // converge into the next node
+      }
+      segments.push({ row: i, topLane, bottomLane, colorIndex: entry.lane % LANE_COLORS });
+    }
+  }
+
+  let usedLanes = 1;
+  for (const n of nodes) usedLanes = Math.max(usedLanes, n.lane + 1);
+  for (const s of segments) usedLanes = Math.max(usedLanes, s.topLane + 1, s.bottomLane + 1);
+  return { nodes, segments, usedLanes };
+}
+
+// ── Commit graph: SVG rail ──────────────────────────────────────────────────
+// Geometry only; all color comes from the .wgit-lane-{n} classes so the rail
+// re-themes on the light/dark flip with no JS. The SVG is decorative
+// (aria-hidden) — meaning lives in the text rows, which stay keyboard-operable.
+const SVG_NS = 'http://www.w3.org/2000/svg';
+const LANE_W = 14;       // horizontal distance between lane centers (px)
+const GRAPH_LEFT = 10;   // x of lane 0's center
+const NODE_R = 3.5;
+const HEAD_RING_R = 6;   // outer ring drawn around the current-HEAD node
+
+function _svgEl(tag, attrs = {}, children = []) {
+  const el = document.createElementNS(SVG_NS, tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (v === null || v === undefined || v === false) continue;
+    el.setAttribute(k, v === true ? '' : String(v));
+  }
+  for (const c of [].concat(children)) if (c) el.appendChild(c);
+  return el;
+}
+
+function _laneX(lane) { return GRAPH_LEFT + lane * LANE_W; }
+function _graphGutter(usedLanes) { return _laneX(usedLanes - 1) + LANE_W; }
+
+function _buildGraphSvg(graph, rowH) {
+  const width = _graphGutter(graph.usedLanes);
+  const height = graph.nodes.length * rowH;
+  const svg = _svgEl('svg', {
+    class: 'wgit-graph-svg', 'aria-hidden': 'true',
+    width, height, viewBox: `0 0 ${width} ${height}`, preserveAspectRatio: 'xMinYMin meet',
+  });
+  // Edges first so the round nodes sit on top of the lines.
+  for (const s of graph.segments) {
+    const x1 = _laneX(s.topLane);
+    const x2 = _laneX(s.bottomLane);
+    const y1 = s.row * rowH + rowH / 2;
+    const y2 = (s.row + 1) * rowH + rowH / 2;
+    const ym = (y1 + y2) / 2;
+    const d = x1 === x2
+      ? `M${x1} ${y1} L${x2} ${y2}`
+      : `M${x1} ${y1} C${x1} ${ym} ${x2} ${ym} ${x2} ${y2}`;
+    svg.appendChild(_svgEl('path', { class: `wgit-edge wgit-lane-${s.colorIndex}`, d }));
+  }
+  for (const n of graph.nodes) {
+    const cx = _laneX(n.lane);
+    const cy = n.row * rowH + rowH / 2;
+    if (n.isHead) svg.appendChild(_svgEl('circle', { class: `wgit-node-head wgit-lane-${n.colorIndex}`, cx, cy, r: HEAD_RING_R }));
+    svg.appendChild(_svgEl('circle', { class: `wgit-node wgit-lane-${n.colorIndex}`, cx, cy, r: NODE_R }));
+  }
+  return svg;
+}
+
+// Typed branch/remote/tag chips rendered before the subject. Restrained,
+// extends the existing badge vocabulary; the full ref name is on `title`.
+const _REF_CLASS = {
+  head: 'wgit-ref-head',
+  tag: 'wgit-ref-tag',
+  remote: 'wgit-ref-remote',
+  local: 'wgit-ref-local',
+};
+function _refChips(refs) {
+  return (refs || []).map((ref) => {
+    const typeClass = _REF_CLASS[ref.type] || _REF_CLASS.local;
+    return _h('span', {
+      class: `wgit-ref ${typeClass}${ref.current ? ' is-current' : ''}`,
+      title: ref.name, text: ref.name,
+    });
+  });
+}
+
 function _renderHistory(panel) {
   panel.innerHTML = '';
   const path = _historyPath();
@@ -1509,18 +1656,31 @@ async function _loadHistory(path) {
   }
   if (_historyPath() !== path) return; // superseded by a newer scope/selection
   list.innerHTML = '';
+  list.style.removeProperty('--wgit-graph-gutter');
   const commits = data.commits || [];
   if (!commits.length) {
     list.appendChild(_h('div', { class: 'wgit-file-loading', text: 'No commits yet.' }));
     return;
   }
+
+  // Lay the lanes out, reserve a gutter the rows indent past, and paint one
+  // continuous rail behind them. Row height is the single source of truth for
+  // node Y math — read it from CSS so density/theme overrides stay honored.
+  const graph = _computeGraph(commits);
+  const rowH = parseFloat(getComputedStyle(list).getPropertyValue('--wgit-row-h')) || 42;
+  list.style.setProperty('--wgit-graph-gutter', `${_graphGutter(graph.usedLanes)}px`);
+  list.appendChild(_buildGraphSvg(graph, rowH));
+
   commits.forEach((c) => {
     const row = _h('div', {
       class: `wgit-commit-row${_selectedCommit && _selectedCommit.sha === c.sha ? ' is-selected' : ''}`,
       dataset: { sha: c.sha },
       onActivate: () => _showCommitDetail(c),
     }, [
-      _h('div', { class: 'wgit-commit-subject', title: c.message, text: c.message || '(no message)' }),
+      _h('div', { class: 'wgit-commit-line' }, [
+        ..._refChips(c.refs),
+        _h('span', { class: 'wgit-commit-subject', title: c.message, text: c.message || '(no message)' }),
+      ]),
       _h('div', { class: 'wgit-commit-meta' }, [
         _h('span', { class: 'wgit-commit-sha', text: _shortSha(c.sha) }),
         _h('span', { class: 'wgit-commit-author', text: c.author || '' }),
@@ -1531,9 +1691,9 @@ async function _loadHistory(path) {
   });
 }
 
-// Read-only commit view. The backend exposes commit metadata (not a per-commit
-// file diff), so this surface shows the full commit details and never offers
-// edit/stage controls.
+// Read-only commit view: subject + metadata, plus the changed-files list and a
+// totals summary fetched from the commit stat endpoint. Never offers
+// edit/stage controls — inspecting history must not mutate the tree.
 function _showCommitDetail(commit) {
   _selectedCommit = commit;
   if (_modal) {
@@ -1544,12 +1704,16 @@ function _showCommitDetail(commit) {
   const pane = _modal && _modal.querySelector('#wgit-commit-detail');
   if (!pane) return;
   pane.innerHTML = '';
+  const files = _h('div', { class: 'wgit-commit-files' }, [
+    _h('div', { class: 'wgit-file-loading', role: 'status', text: 'Loading changes…' }),
+  ]);
   pane.append(
     _h('div', { class: 'wgit-commit-detail-head' }, [
       _h('span', { class: 'wgit-commit-detail-sha', text: _shortSha(commit.sha) }),
       _h('span', { class: 'wgit-commit-detail-ro', text: 'Read-only' }),
     ]),
     _h('div', { class: 'wgit-commit-detail-subject', text: commit.message || '(no message)' }),
+    files,
     _h('dl', { class: 'wgit-commit-detail-meta' }, [
       _h('dt', { text: 'Author' }),
       _h('dd', { text: `${commit.author || ''}${commit.email ? ` <${commit.email}>` : ''}` }),
@@ -1558,6 +1722,51 @@ function _showCommitDetail(commit) {
       _h('dt', { text: 'Commit' }),
       _h('dd', { class: 'wgit-mono', text: commit.sha || '' }),
     ]),
+  );
+  _loadCommitFiles(commit, files);
+}
+
+// Render a `+ins / −del` stat pair, omitting a side that is zero; a binary
+// file (null counts) reads as "binary".
+function _statPair(insertions, deletions, cls) {
+  if (insertions === null || deletions === null) {
+    return _h('span', { class: 'wgit-commit-file-bin', text: 'binary' });
+  }
+  return _h('span', { class: cls }, [
+    insertions ? _h('span', { class: 'wgit-stat-add', text: `+${insertions}` }) : null,
+    deletions ? _h('span', { class: 'wgit-stat-del', text: `−${deletions}` }) : null,
+  ]);
+}
+
+async function _loadCommitFiles(commit, container) {
+  const fresh = () => _selectedCommit && _selectedCommit.sha === commit.sha;
+  let data;
+  try {
+    data = await gitApi(EP.commit, { query: { workspace: state.workspace, sha: commit.sha } });
+  } catch (err) {
+    if (!fresh()) return; // a newer commit was selected while loading
+    container.innerHTML = '';
+    container.appendChild(_h('div', { class: 'wgit-file-loading', text: err.message || 'Could not load changes' }));
+    return;
+  }
+  if (!fresh()) return;
+  const detail = data.commit || {};
+  const files = detail.files || [];
+  const count = detail.fileCount || files.length;
+  container.innerHTML = '';
+  container.append(
+    _h('div', { class: 'wgit-commit-summary' }, [
+      _h('span', { class: 'wgit-commit-summary-count', text: count === 1 ? '1 file changed' : `${count} files changed` }),
+      _statPair(detail.additions || 0, detail.deletions || 0, 'wgit-commit-summary-stat'),
+    ]),
+    files.length
+      ? _h('div', { class: 'wgit-commit-filelist' }, files.map((f) => _h('div', {
+          class: 'wgit-commit-file', title: f.path,
+        }, [
+          _h('span', { class: 'wgit-commit-file-path', text: f.path }),
+          _statPair(f.insertions, f.deletions, 'wgit-commit-file-stat'),
+        ])))
+      : _h('div', { class: 'wgit-file-loading', text: 'No file changes.' }),
   );
 }
 
@@ -1602,10 +1811,17 @@ async function _loadBlame(path, body) {
   // so per-row appends to the live tree would thrash layout.
   const frag = document.createDocumentFragment();
   lines.forEach((ln, i) => {
-    frag.appendChild(_h('div', { class: 'wgit-blame-row' }, [
+    const sha = String(ln.sha || '');
+    // git uses an all-zero SHA for lines not in any commit yet.
+    const uncommitted = /^0+$/.test(sha);
+    frag.appendChild(_h('div', { class: `wgit-blame-row${uncommitted ? ' is-uncommitted' : ''}` }, [
       _h('span', { class: 'wgit-blame-num', text: String(i + 1) }),
-      _h('span', { class: 'wgit-blame-sha', title: ln.sha || '', text: _shortSha(ln.sha) }),
-      _h('span', { class: 'wgit-blame-author', title: ln.author || '', text: ln.author || '' }),
+      _h('span', {
+        class: 'wgit-blame-sha',
+        title: uncommitted ? 'Uncommitted — not in any commit yet' : sha,
+        text: uncommitted ? 'U' : _shortSha(sha),
+      }),
+      _h('span', { class: 'wgit-blame-author', title: ln.author || '', text: uncommitted ? 'Uncommitted' : (ln.author || '') }),
       _h('span', { class: 'wgit-blame-text', text: ln.text != null ? ln.text : '' }),
     ]));
   });

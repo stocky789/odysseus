@@ -66,6 +66,19 @@
   /* Warm accent — used by the Goals/Today UI in Notes. Lives as a token so
      themes can override without touching the goal CSS. */
   --accent-warm: #d19a66;
+
+  /* Commit-graph rail: fixed row height (node Y math depends on it) and an
+     8-lane palette drawn from the one-dark base. Muted but separable hue to
+     hue; redefined for the light theme below so the rail re-themes via CSS. */
+  --wgit-row-h: 42px;
+  --wgit-lane-0: #61afef; /* blue   */
+  --wgit-lane-1: #98c379; /* green  */
+  --wgit-lane-2: #c678dd; /* purple */
+  --wgit-lane-3: #e5c07b; /* yellow */
+  --wgit-lane-4: #56b6c2; /* cyan   */
+  --wgit-lane-5: #e06c75; /* red    */
+  --wgit-lane-6: #d19a66; /* orange */
+  --wgit-lane-7: #c8a2d8; /* lilac  */
 }
 
 :root.light {
@@ -73,6 +86,15 @@
   --fg: #2b2b2b;
   --panel: #fff;
   --border: #bbb;
+  /* Darkened lanes so the thin rail keeps >=3:1 against the near-white bg. */
+  --wgit-lane-0: #2f74c0;
+  --wgit-lane-1: #3f8f3f;
+  --wgit-lane-2: #9a4dbf;
+  --wgit-lane-3: #9a7d10;
+  --wgit-lane-4: #20808c;
+  --wgit-lane-5: #c0392b;
+  --wgit-lane-6: #b5651d;
+  --wgit-lane-7: #b0458f;
   --hl-bg: #f9f9f9;
   --hl-fg: #2b2b2b;
   --hl-keyword: #7928a1;
@@ -37026,26 +37048,110 @@ body.theme-frosted .modal {
 
 .wgit-history { display: flex; gap: 12px; align-items: stretch; flex-wrap: wrap; }
 .wgit-history-list {
+  position: relative;          /* anchors the absolutely-positioned graph rail */
   flex: 1 1 320px;
   min-width: 0;
   max-height: 54vh;
   overflow: auto;
 }
+/* One continuous rail painted in the left gutter. Decorative + click-through;
+   it scrolls with the rows because it is absolutely positioned inside the
+   scroll container. */
+.wgit-graph-svg {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+  z-index: 1;
+  overflow: visible;
+}
+/* Each lane class resolves to one local --lane; nodes fill it, edges stroke it,
+   so the whole rail re-themes on the light/dark flip with no JS. */
+.wgit-lane-0 { --lane: var(--wgit-lane-0); }
+.wgit-lane-1 { --lane: var(--wgit-lane-1); }
+.wgit-lane-2 { --lane: var(--wgit-lane-2); }
+.wgit-lane-3 { --lane: var(--wgit-lane-3); }
+.wgit-lane-4 { --lane: var(--wgit-lane-4); }
+.wgit-lane-5 { --lane: var(--wgit-lane-5); }
+.wgit-lane-6 { --lane: var(--wgit-lane-6); }
+.wgit-lane-7 { --lane: var(--wgit-lane-7); }
+.wgit-edge {
+  fill: none;
+  stroke: var(--lane, var(--fg-muted));
+  stroke-width: 1.6px;
+  stroke-linecap: round;
+}
+.wgit-node {
+  fill: var(--lane, var(--fg-muted));
+  stroke: var(--bg);            /* a hairline so lines reading behind it stay clean */
+  stroke-width: 1px;
+}
+.wgit-node-head {
+  fill: none;
+  stroke: var(--lane, var(--fg-muted));
+  stroke-width: 1.5px;
+  opacity: 0.5;                 /* a soft ring marks the current HEAD commit */
+}
 .wgit-commit-row {
-  padding: 7px 8px;
-  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  height: var(--wgit-row-h);    /* fixed: the SVG node Y math depends on it */
+  padding: 0 8px 0 calc(var(--wgit-graph-gutter, 0px) + 6px);
   cursor: pointer;
   border-bottom: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
+  transition: background 0.15s ease;
 }
 .wgit-commit-row:hover { background: color-mix(in srgb, var(--border) 20%, transparent); }
 .wgit-commit-row.is-selected { background: color-mix(in srgb, var(--accent, var(--red)) 14%, transparent); }
+.wgit-commit-line {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  overflow: hidden;            /* many ref chips clip rather than spill into meta */
+}
 .wgit-commit-subject {
   font-size: 12.5px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  margin-bottom: 3px;
+  min-width: 0;
+  flex: 1;
 }
+/* Branch / remote / tag chips: text stays at --fg for legibility in both
+   themes; the type is carried by a tinted border + fill, HEAD emphasized. */
+.wgit-ref {
+  font-size: 10px;
+  line-height: 1.5;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--border) 75%, transparent);
+  background: color-mix(in srgb, var(--border) 16%, transparent);
+  color: var(--fg);
+  max-width: 14ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.wgit-ref-head {
+  border-color: color-mix(in srgb, var(--accent, var(--red)) 55%, transparent);
+  background: color-mix(in srgb, var(--accent, var(--red)) 16%, transparent);
+}
+.wgit-ref-head.is-current { font-weight: 700; }
+.wgit-ref-remote {
+  border-color: color-mix(in srgb, var(--wgit-lane-0) 50%, transparent);
+  background: color-mix(in srgb, var(--wgit-lane-0) 13%, transparent);
+}
+.wgit-ref-tag {
+  border-color: color-mix(in srgb, var(--wgit-lane-3) 55%, transparent);
+  background: color-mix(in srgb, var(--wgit-lane-3) 14%, transparent);
+}
+.wgit-ref-local { border-color: color-mix(in srgb, var(--border) 80%, transparent); }
 .wgit-commit-meta {
   display: flex;
   gap: 8px;
@@ -37056,6 +37162,7 @@ body.theme-frosted .modal {
 .wgit-commit-sha {
   font-family: var(--mono, monospace);
   color: color-mix(in srgb, var(--accent, var(--red)) 85%, var(--fg));
+  flex-shrink: 0;
 }
 .wgit-commit-author { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
 .wgit-commit-date { flex-shrink: 0; }
@@ -37109,6 +37216,47 @@ body.theme-frosted .modal {
 .wgit-commit-detail-meta dt { color: var(--fg-muted); }
 .wgit-commit-detail-meta dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
 
+/* Changed-files list for the selected commit (read-only). */
+.wgit-commit-files { margin: 0 0 12px; }
+.wgit-commit-summary {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--fg-muted);
+  padding-bottom: 6px;
+  margin-bottom: 6px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 45%, transparent);
+}
+.wgit-commit-summary-count { color: var(--fg); font-weight: 600; }
+.wgit-commit-summary-stat,
+.wgit-commit-file-stat { display: inline-flex; gap: 6px; flex-shrink: 0; }
+.wgit-commit-filelist {
+  display: flex;
+  flex-direction: column;
+  max-height: 30vh;
+  overflow: auto;
+}
+.wgit-commit-file {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+  padding: 2px 0;
+  min-width: 0;
+}
+.wgit-commit-file-path {
+  font-family: var(--mono, monospace);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wgit-stat-add { color: var(--color-success); }
+.wgit-stat-del { color: var(--color-error); }
+.wgit-commit-file-bin { color: var(--fg-muted); font-style: italic; font-size: 11px; }
+
 .wgit-blame-head { padding: 2px 2px 8px; }
 .wgit-blame-path {
   font-family: var(--mono, monospace);
@@ -37134,9 +37282,15 @@ body.theme-frosted .modal {
 .wgit-blame-row:hover { background: color-mix(in srgb, var(--border) 18%, transparent); }
 .wgit-blame-num { color: color-mix(in srgb, var(--fg-muted) 70%, transparent); text-align: right; user-select: none; }
 .wgit-blame-sha { color: color-mix(in srgb, var(--accent, var(--red)) 80%, var(--fg)); overflow: hidden; text-overflow: ellipsis; }
+/* Uncommitted lines: a single-letter badge instead of the all-zero SHA. */
+.wgit-blame-row.is-uncommitted .wgit-blame-sha { color: var(--color-warning); font-weight: 700; }
+.wgit-blame-row.is-uncommitted .wgit-blame-author { font-style: italic; opacity: 0.8; }
 .wgit-blame-author { color: var(--fg-muted); overflow: hidden; text-overflow: ellipsis; }
 .wgit-blame-text { white-space: pre; overflow: hidden; text-overflow: ellipsis; color: var(--fg); }
-@media (prefers-reduced-motion: reduce) { .wgit-scope-btn { transition: none; } }
+@media (prefers-reduced-motion: reduce) {
+  .wgit-scope-btn,
+  .wgit-commit-row { transition: none; }
+}
 
 /* ── Git panel: Conflicts ─────────────────────────────────────────── */
 .wgit-conflicts {
