@@ -258,7 +258,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "search_chats",
-            "description": "Search the user's past chat conversations by keyword. Use when the user asks about previous chats, past conversations, or wants to find a discussion they had before. Returns matching sessions with clickable links.",
+            "description": "Search the user's past session transcripts by keyword. Use when the user asks about previous chats, past conversations, or when direct transcript evidence is better than persistent memory. Returns matching sessions with clickable links and nearby context.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -471,6 +471,20 @@ FUNCTION_TOOL_SCHEMAS = [
                     "multi": {"type": "boolean", "description": "Set true to let the user select multiple options instead of one. Default false."}
                 },
                 "required": ["question", "options"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_plan",
+            "description": "Write back to the ACTIVE PLAN: mark steps done or revise them. Use this while executing an approved plan — after you finish a step, call update_plan with the full checklist and that step marked `- [x]`; when the user asks to change the plan, call it with the revised checklist. The user's docked plan window updates live. Pass the COMPLETE checklist every time (not a diff). No effect if there is no active plan.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "plan": {"type": "string", "description": "The full updated plan as a GitHub-style markdown checklist — one step per line, `- [ ]` for pending and `- [x]` for done. Always send the whole list."}
+                },
+                "required": ["plan"]
             }
         }
     },
