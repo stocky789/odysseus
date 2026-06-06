@@ -107,7 +107,7 @@ def _verify_session_owner(request: Request, session_id: str, session_manager=Non
         except HTTPException:
             raise
         except Exception:
-            raise HTTPException(403, "Authentication required")
+            raise HTTPException(401, "Not authenticated")
     db = SessionLocal()
     try:
         row = db.query(DbSession.owner).filter(DbSession.id == session_id).first()
