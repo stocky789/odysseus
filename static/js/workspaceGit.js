@@ -743,12 +743,12 @@ function _renderDiff(pane, data, path, staged) {
 function _renderHunk(hunk, path, staged) {
   const headBtn = staged
     ? _h('button', {
-        type: 'button', class: 'wgit-hunk-btn wgit-hunk-unstage', text: 'Unstage hunk',
-        onclick: () => _unstageHunk(path, hunk.id),
+        type: 'button', class: 'wgit-hunk-btn wgit-hunk-unstage', text: 'Unstage',
+        title: 'Unstage this hunk', onclick: () => _unstageHunk(path, hunk.id),
       })
     : _h('button', {
-        type: 'button', class: 'wgit-hunk-btn wgit-hunk-stage', text: 'Stage hunk',
-        onclick: () => _stageHunk(path, hunk.id),
+        type: 'button', class: 'wgit-hunk-btn wgit-hunk-stage', text: 'Stage',
+        title: 'Stage this hunk', onclick: () => _stageHunk(path, hunk.id),
       });
   const head = _h('div', { class: 'wgit-hunk-head' }, [
     _h('span', { class: 'wgit-hunk-header', text: hunk.header }),
