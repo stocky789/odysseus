@@ -853,21 +853,118 @@ def git_clone(workspace: str | None, url: str, target: str | None = None, name: 
     return {"ok": True, "path": os.path.realpath(dest)}
 
 
+def _git_remotes(ctx: RepoContext) -> set[str]:
+    result = git_run(ctx.repo_root, ["remote"], check=False)
+    if result.returncode != 0:
+        return set()
+    return {line.strip() for line in result.stdout.splitlines() if line.strip()}
+
+
+def _parse_refs(decoration: str, remotes: set[str]) -> list[dict[str, Any]]:
+    """Turn a `--decorate=short` `%D` string into typed ref objects so the
+    frontend never has to string-parse decorations. Ref names cannot contain a
+    space, so splitting on ", " is unambiguous."""
+    refs: list[dict[str, Any]] = []
+    for raw in (decoration or "").strip().split(", "):
+        name = raw.strip()
+        if not name:
+            continue
+        if name.startswith("HEAD -> "):
+            refs.append({"name": name[len("HEAD -> "):].strip(), "type": "head", "current": True})
+        elif name == "HEAD":
+            refs.append({"name": "HEAD", "type": "head", "current": True})
+        elif name.startswith("tag: "):
+            refs.append({"name": name[len("tag: "):].strip(), "type": "tag", "current": False})
+        else:
+            remote = name.split("/", 1)[0] in remotes
+            refs.append({"name": name, "type": "remote" if remote else "local", "current": False})
+    return refs
+
+
 def git_history(workspace: str, path: str | None = None, limit: int = 50) -> dict[str, Any]:
     ctx = repo_context(workspace)
     limit = max(1, min(int(limit or 50), 200))
-    args = ["log", f"-n{limit}", "--date=iso-strict", "--pretty=format:%H%x1f%an%x1f%ae%x1f%ad%x1f%s"]
+    fmt = "%H%x1f%P%x1f%D%x1f%an%x1f%ae%x1f%ad%x1f%s"
+    args = ["log", f"-n{limit}", "--date-order", "--decorate=short", "--date=iso-strict", f"--pretty=format:{fmt}"]
     if path:
+        # File scope stays linear on the current branch (single file).
         args.extend(["--", _repo_rel(ctx, path)])
-    elif ctx.prefix:
-        args.extend(["--", ctx.prefix])
+    else:
+        # Repo scope draws every local + remote ref as a lane.
+        args.append("--all")
+        if ctx.prefix:
+            args.extend(["--", ctx.prefix])
     result = git_run(ctx.repo_root, args)
+    remotes = _git_remotes(ctx)
     commits = []
     for line in result.stdout.splitlines():
         parts = line.split("\x1f")
-        if len(parts) == 5:
-            commits.append({"sha": parts[0], "author": parts[1], "email": parts[2], "date": parts[3], "message": parts[4]})
+        if len(parts) == 7:
+            commits.append({
+                "sha": parts[0],
+                "parents": parts[1].split(),
+                "refs": _parse_refs(parts[2], remotes),
+                "author": parts[3],
+                "email": parts[4],
+                "date": parts[5],
+                "message": parts[6],
+            })
     return {"ok": True, "commits": commits}
+
+
+_COMMIT_SHA_RE = re.compile(r"[0-9a-fA-F]{4,40}")
+
+
+def _numstat_count(value: str) -> int | None:
+    """A numstat column is a decimal count, or '-' for a binary file."""
+    return int(value) if value.isdigit() else None
+
+
+def git_commit_stat(workspace: str, sha: str) -> dict[str, Any]:
+    ctx = repo_context(workspace)
+    candidate = (sha or "").strip()
+    if not _COMMIT_SHA_RE.fullmatch(candidate):
+        raise GitWorkspaceError("git_failed", "invalid commit id")
+    verify = git_run(ctx.repo_root, ["rev-parse", "--verify", "--quiet", f"{candidate}^{{commit}}"], check=False)
+    resolved = verify.stdout.strip()
+    if verify.returncode != 0 or not resolved:
+        raise GitWorkspaceError("git_failed", "unknown commit")
+    # An RS (\x1e) terminates the header so a multi-line body never collides with
+    # the numstat block that follows; fields inside the header split on US (\x1f).
+    fmt = "%H%x1f%P%x1f%an%x1f%ae%x1f%ad%x1f%s%x1f%b%x1e"
+    result = git_run(ctx.repo_root, ["show", "--no-color", "--numstat", f"--format={fmt}", resolved, "--"])
+    header, _, rest = result.stdout.partition("\x1e")
+    fields = header.split("\x1f")
+    if len(fields) != 7:
+        raise GitWorkspaceError("git_failed", "could not read commit")
+    files: list[dict[str, Any]] = []
+    additions = 0
+    deletions = 0
+    for line in rest.splitlines():
+        if "\t" not in line:
+            continue
+        ins_raw, del_raw, path = line.split("\t", 2)
+        insertions = _numstat_count(ins_raw)
+        removed = _numstat_count(del_raw)
+        additions += insertions or 0
+        deletions += removed or 0
+        files.append({"path": path, "insertions": insertions, "deletions": removed})
+    return {
+        "ok": True,
+        "commit": {
+            "sha": fields[0],
+            "parents": fields[1].split(),
+            "author": fields[2],
+            "email": fields[3],
+            "date": fields[4],
+            "subject": fields[5],
+            "body": fields[6].rstrip("\n"),
+            "files": files,
+            "fileCount": len(files),
+            "additions": additions,
+            "deletions": deletions,
+        },
+    }
 
 
 def git_blame(workspace: str, path: str) -> dict[str, Any]:
