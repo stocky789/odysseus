@@ -5,6 +5,7 @@
 import Storage from './js/storage.js';
 import uiModule from './js/ui.js';
 import workspaceModule from './js/workspace.js';
+import workspaceGitModule from './js/workspaceGit.js';
 import fileHandlerModule from './js/fileHandler.js';
 import modelsModule from './js/models.js';
 import ragModule from './js/rag.js';
@@ -1694,6 +1695,7 @@ function initializeEventListeners() {
   setupToggle('web-toggle-btn', 'web-toggle', 'web');
   setupToggle('bash-toggle-btn', 'bash-toggle', 'bash');
   try { workspaceModule.initWorkspace(); } catch (_) {}
+  try { workspaceGitModule.initWorkspaceGitPanel(); } catch (_) {}
   setupToggle('plan-toggle-btn', 'plan-toggle', 'plan');
 
   // Set plan mode on/off directly (checkbox + button state + saved pref) WITHOUT
@@ -1769,6 +1771,7 @@ function initializeEventListeners() {
   })();
 
   try { workspaceModule.initWorkspace(); } catch (_) {}
+  try { workspaceGitModule.initWorkspaceGitPanel(); } catch (_) {}
 
   // Document editor toggle (special: uses module panel, not a checkbox)
   const overflowDocBtn = el('overflow-doc-btn');
