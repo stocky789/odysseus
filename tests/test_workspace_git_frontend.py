@@ -711,3 +711,26 @@ def test_history_graph_node_and_chip_css():
     assert '.wgit-node' in css, 'node styles missing'
     assert 'wgit-node-head' in css, 'HEAD node ring missing'
     assert '.wgit-ref' in css, 'ref chip styles missing'
+
+
+def test_commit_detail_loads_changed_files():
+    src = read('static/js/workspaceGit.js')
+    assert '/api/workspace/git/commit' in src, 'commit detail must call the commit stat endpoint'
+    idx = src.find('function _showCommitDetail')
+    assert idx != -1, '_showCommitDetail missing'
+    body = src[idx:idx + 1600]
+    assert 'EP.commit' in body or '_loadCommitFiles' in body, 'detail must fetch the commit stat'
+
+
+def test_commit_detail_renders_files_and_summary():
+    src = read('static/js/workspaceGit.js')
+    assert 'wgit-commit-detail' in src, 'detail container hook must survive'
+    for cls in ('wgit-commit-summary', 'wgit-commit-file'):
+        assert cls in src, f'{cls} missing from commit detail'
+    assert 'files changed' in src or 'file changed' in src, 'summary line missing'
+
+
+def test_commit_detail_files_css_present():
+    css = read('static/style.css')
+    for cls in ('.wgit-commit-summary', '.wgit-commit-file'):
+        assert cls in css, f'{cls} CSS missing'

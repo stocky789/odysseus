@@ -1691,9 +1691,9 @@ async function _loadHistory(path) {
   });
 }
 
-// Read-only commit view. The backend exposes commit metadata (not a per-commit
-// file diff), so this surface shows the full commit details and never offers
-// edit/stage controls.
+// Read-only commit view: subject + metadata, plus the changed-files list and a
+// totals summary fetched from the commit stat endpoint. Never offers
+// edit/stage controls — inspecting history must not mutate the tree.
 function _showCommitDetail(commit) {
   _selectedCommit = commit;
   if (_modal) {
@@ -1704,12 +1704,16 @@ function _showCommitDetail(commit) {
   const pane = _modal && _modal.querySelector('#wgit-commit-detail');
   if (!pane) return;
   pane.innerHTML = '';
+  const files = _h('div', { class: 'wgit-commit-files' }, [
+    _h('div', { class: 'wgit-file-loading', role: 'status', text: 'Loading changes…' }),
+  ]);
   pane.append(
     _h('div', { class: 'wgit-commit-detail-head' }, [
       _h('span', { class: 'wgit-commit-detail-sha', text: _shortSha(commit.sha) }),
       _h('span', { class: 'wgit-commit-detail-ro', text: 'Read-only' }),
     ]),
     _h('div', { class: 'wgit-commit-detail-subject', text: commit.message || '(no message)' }),
+    files,
     _h('dl', { class: 'wgit-commit-detail-meta' }, [
       _h('dt', { text: 'Author' }),
       _h('dd', { text: `${commit.author || ''}${commit.email ? ` <${commit.email}>` : ''}` }),
@@ -1718,6 +1722,51 @@ function _showCommitDetail(commit) {
       _h('dt', { text: 'Commit' }),
       _h('dd', { class: 'wgit-mono', text: commit.sha || '' }),
     ]),
+  );
+  _loadCommitFiles(commit, files);
+}
+
+// Render a `+ins / −del` stat pair, omitting a side that is zero; a binary
+// file (null counts) reads as "binary".
+function _statPair(insertions, deletions, cls) {
+  if (insertions === null || deletions === null) {
+    return _h('span', { class: 'wgit-commit-file-bin', text: 'binary' });
+  }
+  return _h('span', { class: cls }, [
+    insertions ? _h('span', { class: 'wgit-stat-add', text: `+${insertions}` }) : null,
+    deletions ? _h('span', { class: 'wgit-stat-del', text: `−${deletions}` }) : null,
+  ]);
+}
+
+async function _loadCommitFiles(commit, container) {
+  const fresh = () => _selectedCommit && _selectedCommit.sha === commit.sha;
+  let data;
+  try {
+    data = await gitApi(EP.commit, { query: { workspace: state.workspace, sha: commit.sha } });
+  } catch (err) {
+    if (!fresh()) return; // a newer commit was selected while loading
+    container.innerHTML = '';
+    container.appendChild(_h('div', { class: 'wgit-file-loading', text: err.message || 'Could not load changes' }));
+    return;
+  }
+  if (!fresh()) return;
+  const detail = data.commit || {};
+  const files = detail.files || [];
+  const count = detail.fileCount || files.length;
+  container.innerHTML = '';
+  container.append(
+    _h('div', { class: 'wgit-commit-summary' }, [
+      _h('span', { class: 'wgit-commit-summary-count', text: count === 1 ? '1 file changed' : `${count} files changed` }),
+      _statPair(detail.additions ?? 0, detail.deletions ?? 0, 'wgit-commit-summary-stat'),
+    ]),
+    files.length
+      ? _h('div', { class: 'wgit-commit-filelist' }, files.map((f) => _h('div', {
+          class: 'wgit-commit-file', title: f.path,
+        }, [
+          _h('span', { class: 'wgit-commit-file-path', text: f.path }),
+          _statPair(f.insertions, f.deletions, 'wgit-commit-file-stat'),
+        ])))
+      : _h('div', { class: 'wgit-file-loading', text: 'No file changes.' }),
   );
 }
 

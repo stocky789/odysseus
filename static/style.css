@@ -37215,6 +37215,47 @@ body.theme-frosted .modal {
 .wgit-commit-detail-meta dt { color: var(--fg-muted); }
 .wgit-commit-detail-meta dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
 
+/* Changed-files list for the selected commit (read-only). */
+.wgit-commit-files { margin: 0 0 12px; }
+.wgit-commit-summary {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--fg-muted);
+  padding-bottom: 6px;
+  margin-bottom: 6px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 45%, transparent);
+}
+.wgit-commit-summary-count { color: var(--fg); font-weight: 600; }
+.wgit-commit-summary-stat,
+.wgit-commit-file-stat { display: inline-flex; gap: 6px; flex-shrink: 0; }
+.wgit-commit-filelist {
+  display: flex;
+  flex-direction: column;
+  max-height: 30vh;
+  overflow: auto;
+}
+.wgit-commit-file {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+  padding: 2px 0;
+  min-width: 0;
+}
+.wgit-commit-file-path {
+  font-family: var(--mono, monospace);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wgit-stat-add { color: var(--color-success); }
+.wgit-stat-del { color: var(--color-error); }
+.wgit-commit-file-bin { color: var(--fg-muted); font-style: italic; font-size: 11px; }
+
 .wgit-blame-head { padding: 2px 2px 8px; }
 .wgit-blame-path {
   font-family: var(--mono, monospace);
