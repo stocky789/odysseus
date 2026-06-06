@@ -75,7 +75,7 @@ def _enforce_chat_privileges(request, sess) -> None:
     allowlist, or HTTPException(429) if the user has hit their daily message
     cap. No-op for unauthenticated callers or when auth_manager is absent
     (single-user mode). Admins receive ADMIN_PRIVILEGES from get_privileges,
-    which means empty allowed_models / zero cap → no-op for them.
+    which means unrestricted allowed_models / zero cap -> no-op for them.
     """
     try:
         user = get_current_user(request)
@@ -88,8 +88,10 @@ def _enforce_chat_privileges(request, sess) -> None:
         return
 
     privs = auth_manager.get_privileges(user) or {}
-    allowed = privs.get("allowed_models") or []
-    if allowed and sess.model and sess.model not in allowed:
+    allowed_raw = privs.get("allowed_models")
+    allowed = allowed_raw if isinstance(allowed_raw, list) else []
+    restricted = bool(privs.get("allowed_models_restricted")) or bool(allowed)
+    if restricted and sess.model and sess.model not in allowed:
         raise HTTPException(403, f"Your account is not allowed to use model '{sess.model}'.")
 
     cap = int(privs.get("max_messages_per_day") or 0)
@@ -194,14 +196,25 @@ def try_fallback_endpoint(sess, session_id: str) -> dict | None:
     Returns {"model": ..., "endpoint_url": ..., "endpoint_name": ...} or None.
     """
     import requests as _req
-    from src.endpoint_resolver import build_chat_url, build_headers, build_models_url, normalize_base
+    from src.endpoint_resolver import (
+        build_chat_url,
+        build_headers,
+        build_models_url,
+        normalize_base,
+        resolve_endpoint_runtime,
+    )
 
     current_url = sess.endpoint_url or ""
+    owner = getattr(sess, "owner", None)
     db = SessionLocal()
     try:
-        endpoints = db.query(ModelEndpoint).filter(
+        q = db.query(ModelEndpoint).filter(
             ModelEndpoint.is_enabled == True
-        ).all()
+        )
+        if owner:
+            from src.auth_helpers import owner_filter
+            q = owner_filter(q, ModelEndpoint, owner)
+        endpoints = q.all()
     finally:
         db.close()
 
@@ -210,26 +223,32 @@ def try_fallback_endpoint(sess, session_id: str) -> dict | None:
         # Skip current endpoint
         if current_url and base in current_url:
             continue
-        # Quick ping
-        ping_url = build_models_url(base)
-        headers = build_headers(ep.api_key, base)
         try:
-            r = _req.get(ping_url, headers=headers, timeout=5)
-            r.raise_for_status()
-            data = r.json()
-            models = [m.get("id") for m in (data.get("data") or []) if m.get("id")]
-            if not models:
-                models = [
-                    m.get("name") or m.get("model")
-                    for m in (data.get("models") or [])
-                    if m.get("name") or m.get("model")
-                ]
+            base, api_key = resolve_endpoint_runtime(ep, owner=owner)
+        except Exception:
+            continue
+        ping_url = build_models_url(base)
+        headers = build_headers(api_key, base)
+        try:
+            if ping_url:
+                r = _req.get(ping_url, headers=headers, timeout=5)
+                r.raise_for_status()
+                data = r.json()
+                models = [m.get("id") for m in (data.get("data") or []) if m.get("id")]
+                if not models:
+                    models = [
+                        m.get("name") or m.get("model")
+                        for m in (data.get("models") or [])
+                        if m.get("name") or m.get("model")
+                    ]
+            else:
+                models = json.loads(ep.cached_models or "[]")
             if not models:
                 continue
             # Found a working endpoint — update session
             new_model = models[0]
             chat_url = build_chat_url(base)
-            new_headers = build_headers(ep.api_key, base)
+            new_headers = build_headers(api_key, base)
 
             sess.model = new_model
             sess.endpoint_url = chat_url
@@ -241,7 +260,7 @@ def try_fallback_endpoint(sess, session_id: str) -> dict | None:
                 _db.query(DBSession).filter(DBSession.id == session_id).update({
                     "model": new_model,
                     "endpoint_url": chat_url,
-                    "headers": json.dumps(new_headers),
+                    "headers": new_headers,
                 })
                 _db.commit()
             finally:
@@ -329,16 +348,26 @@ def _session_url_matches_endpoint(session_url: str, endpoint_base: str) -> bool:
         return False
 
 
+def _has_auth_keys(headers) -> bool:
+    """True if a headers dict carries an Authorization/x-api-key entry."""
+    return isinstance(headers, dict) and any(
+        k.lower() in ('authorization', 'x-api-key') for k in headers
+    )
+
+
 def resolve_session_auth(sess, session_id: str, owner: Optional[str] = None):
     """Ensure session has auth headers — resolve from endpoint DB if missing."""
-    has_auth = sess.headers and isinstance(sess.headers, dict) and any(
-        k.lower() in ('authorization', 'x-api-key') for k in sess.headers
-    )
-    if has_auth:
+    try:
+        from src.chatgpt_subscription import is_chatgpt_subscription_base
+        is_chatgpt_subscription = is_chatgpt_subscription_base(getattr(sess, "endpoint_url", "") or "")
+    except Exception:
+        is_chatgpt_subscription = False
+    has_auth = _has_auth_keys(sess.headers)
+    if has_auth and not is_chatgpt_subscription:
         return
 
     try:
-        from src.endpoint_resolver import build_headers, normalize_base
+        from src.endpoint_resolver import build_headers, resolve_endpoint_runtime
         db = SessionLocal()
         try:
             target_url = getattr(sess, "endpoint_url", "") or ""
@@ -354,10 +383,30 @@ def resolve_session_auth(sess, session_id: str, owner: Optional[str] = None):
             for ep in q.all():
                 if not _session_url_matches_endpoint(target_url, ep.base_url or ""):
                     continue
-                if not ep.api_key:
+                try:
+                    base, api_key = resolve_endpoint_runtime(ep, owner=owner)
+                except Exception as e:
+                    logger.warning("Failed to resolve provider auth for session %s: %s", session_id, e)
                     return
-                base = normalize_base(ep.base_url or "")
-                sess.headers = build_headers(ep.api_key, base)
+                if not api_key:
+                    # No usable key (e.g. ChatGPT Subscription needs re-auth).
+                    return
+                sess.headers = build_headers(api_key, base)
+                if is_chatgpt_subscription:
+                    # The bearer is short-lived and re-resolved per request, so it
+                    # stays request-local and is never written to the plaintext
+                    # sessions.headers column. Proactively strip any bearer an
+                    # older code path may have persisted so it does not linger.
+                    stale_q = db.query(DBSession).filter(DBSession.id == session_id)
+                    if owner:
+                        stale_q = stale_q.filter(DBSession.owner == owner)
+                    stored = stale_q.first()
+                    if stored is not None and _has_auth_keys(stored.headers):
+                        stale_q.update({"headers": {}})
+                        db.commit()
+                        logger.info(f"Cleared persisted ChatGPT Subscription bearer from session {session_id}")
+                    logger.debug(f"Resolved request-local ChatGPT Subscription auth for session {session_id}")
+                    return
                 update_q = db.query(DBSession).filter(DBSession.id == session_id)
                 if owner:
                     update_q = update_q.filter(DBSession.owner == owner)
@@ -401,7 +450,12 @@ def _normalize_model_id_from_cache(sess) -> Optional[str]:
 
     db = SessionLocal()
     try:
-        endpoints = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True).all()
+        q = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
+        owner = getattr(sess, "owner", None)
+        if owner:
+            from src.auth_helpers import owner_filter
+            q = owner_filter(q, ModelEndpoint, owner)
+        endpoints = q.all()
         for ep in endpoints:
             try:
                 if normalize_base(getattr(ep, "base_url", "") or "") != session_base:
@@ -530,7 +584,11 @@ async def build_chat_context(
 
     # Normalize model ID. Prefer cached endpoint models so group chat does not
     # re-hit slow local /models endpoints on every participant turn.
-    norm = _normalize_model_id_from_cache(sess) or normalize_model_id(sess.endpoint_url, sess.model)
+    norm = _normalize_model_id_from_cache(sess) or normalize_model_id(
+        sess.endpoint_url,
+        sess.model,
+        owner=getattr(sess, "owner", None),
+    )
     if norm:
         sess.model = norm
 

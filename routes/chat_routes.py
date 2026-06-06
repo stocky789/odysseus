@@ -20,6 +20,7 @@ from src import agent_runs
 from src.model_context import estimate_tokens
 from src.chat_helpers import coerce_message_and_session
 from src.endpoint_resolver import normalize_base as _normalize_base, build_chat_url
+from src.session_search import search_session_messages
 from src.prompt_security import untrusted_context_message
 from core.exceptions import SessionNotFoundError
 from src.auth_helpers import get_current_user
@@ -167,13 +168,20 @@ def _recover_empty_session_model(sess, session_id: str, owner: str | None = None
     Covers the window between endpoint setup and the first chat send: the
     picker showed a model in the dropdown but the session record never got
     written (Issue #587 — UI uses the cached endpoint list, not s.model).
-    Without this, we'd POST the upstream with model="" and get a generic
-    401/503 instead of using the model the user already picked.
-
-    Returns True iff sess.model was repaired.
+    For ChatGPT Subscription, also repairs stale OpenAI API model names such as
+    ``gpt-5`` that are not accepted by the Codex-backed ChatGPT account route.
     """
-    if getattr(sess, "model", None):
-        return False
+    current_model = (getattr(sess, "model", "") or "").strip()
+    endpoint_url = (getattr(sess, "endpoint_url", "") or "").strip()
+    is_chatgpt_subscription = False
+    if current_model:
+        try:
+            from src.chatgpt_subscription import is_chatgpt_subscription_base
+            is_chatgpt_subscription = is_chatgpt_subscription_base(endpoint_url)
+            if not is_chatgpt_subscription:
+                return False
+        except Exception:
+            return False
     db = SessionLocal()
     try:
         # Prefer the endpoint whose base URL matches the session — we know the
@@ -192,10 +200,35 @@ def _recover_empty_session_model(sess, session_id: str, owner: str | None = None
                     break
         if not ep:
             return False
-        try:
-            cached = json.loads(ep.cached_models) if isinstance(ep.cached_models, str) else (ep.cached_models or [])
-        except Exception:
-            cached = []
+        if not is_chatgpt_subscription:
+            try:
+                from src.chatgpt_subscription import is_chatgpt_subscription_base
+                is_chatgpt_subscription = is_chatgpt_subscription_base(getattr(ep, "base_url", "") or endpoint_url)
+            except Exception:
+                is_chatgpt_subscription = False
+        live_models = []
+        if is_chatgpt_subscription and getattr(ep, "provider_auth_id", None):
+            try:
+                from src.chatgpt_subscription import fetch_available_models
+                from src.endpoint_resolver import resolve_endpoint_runtime
+                _base, api_key = resolve_endpoint_runtime(ep, owner=owner)
+                if api_key:
+                    live_models = fetch_available_models(api_key)
+                    if live_models:
+                        ep.cached_models = json.dumps(live_models)
+                        db.commit()
+            except Exception:
+                live_models = []
+        if is_chatgpt_subscription:
+            # ChatGPT Subscription must use the live Codex catalog only. Do not
+            # recover from stale cached_models rows because those may contain
+            # old hardcoded/synthetic slugs that this account cannot use.
+            cached = live_models
+        else:
+            try:
+                cached = json.loads(ep.cached_models) if isinstance(ep.cached_models, str) else (ep.cached_models or [])
+            except Exception:
+                cached = []
         if not cached:
             return False
         try:
@@ -204,6 +237,8 @@ def _recover_empty_session_model(sess, session_id: str, owner: str | None = None
             visible = cached
         if not visible:
             return False
+        if current_model and current_model in {str(item).strip() for item in visible}:
+            return False
         model = visible[0]
         if not isinstance(model, str) or not model.strip():
             return False
@@ -211,14 +246,17 @@ def _recover_empty_session_model(sess, session_id: str, owner: str | None = None
         # Persist so the next request, websocket reconnect, or page reload
         # picks up the same model (we'd otherwise re-pick on every send
         # and silently switch on the user if the cached order shifts).
-        db_session = db.query(DBSession).filter(DBSession.id == session_id).first()
+        db_session_q = db.query(DBSession).filter(DBSession.id == session_id)
+        if owner:
+            db_session_q = db_session_q.filter(DBSession.owner == owner)
+        db_session = db_session_q.first()
         if db_session:
             db_session.model = model
             db_session.updated_at = datetime.utcnow()
             db.commit()
         sess.model = model
         logger.info(
-            "Recovered empty session model for %s — picked %r from endpoint %s",
+            "Recovered session model for %s — picked %r from endpoint %s",
             session_id, model, ep.id,
         )
         return True
@@ -394,6 +432,7 @@ def setup_chat_routes(
         search_context = form_data.get("search_context")  # pre-fetched web search results (compare mode)
         compare_mode = str(form_data.get("compare_mode", "")).lower() == "true"
         incognito = str(form_data.get("incognito", "")).lower() == "true"
+        plan_mode = str(form_data.get("plan_mode", "")).lower() == "true"
         chat_mode = str(form_data.get("mode", "")).lower()  # 'chat' or 'agent'
         # Workspace: confine the agent's file/shell tools to this folder. Validate
         # it's a real directory; ignore (no confinement) otherwise.
@@ -401,6 +440,17 @@ def setup_chat_routes(
         if workspace:
             _ws_real = os.path.realpath(os.path.expanduser(workspace))
             workspace = _ws_real if os.path.isdir(_ws_real) else ""
+        # Plan mode is a modifier on agent mode — it only makes sense with tools.
+        if plan_mode:
+            chat_mode = "agent"
+        # An approved plan being EXECUTED: the frontend sends the checklist back
+        # on each turn so we can pin it in context. This way a long plan on a
+        # weak model survives history truncation — the agent can always re-read
+        # the plan. Ignored while still proposing (plan_mode on). Capped so a
+        # huge plan can't blow the prompt.
+        approved_plan = ""
+        if not plan_mode:
+            approved_plan = (form_data.get("approved_plan") or "").strip()[:8192]
         # Did the USER explicitly pick agent mode? (vs. us auto-escalating
         # below). Skill extraction should only learn from real agent sessions,
         # not chats we quietly promoted for a notes/calendar intent.
@@ -658,6 +708,13 @@ def setup_chat_routes(
             # In chat mode compare, disable ALL agent tools (no bash, python, file ops)
             if chat_mode == 'chat':
                 disabled_tools.update({"bash", "python", "read_file", "write_file", "web_search", "web_fetch", "search_chats", "manage_tasks"})
+
+        # Plan mode: investigate read-only, propose a plan, don't mutate. Block
+        # every tool not on the read-only allowlist. (stream_agent_loop enforces
+        # this again + drops MCP, so this is belt-and-suspenders.)
+        if plan_mode:
+            from src.tool_security import plan_mode_disabled_tools
+            disabled_tools.update(plan_mode_disabled_tools())
 
         async def stream_with_save() -> AsyncGenerator[str, None]:
             # _effective_mode is read-only here; closure captures it from
@@ -1015,6 +1072,8 @@ def setup_chat_routes(
                         owner=_user,
                         fallbacks=_fallback_candidates,
                         workspace=workspace or None,
+                        plan_mode=plan_mode,
+                        approved_plan=approved_plan or None,
                     ):
                         if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
                             try:
@@ -1035,6 +1094,8 @@ def setup_chat_routes(
                                     "doc_stream_open", "doc_stream_delta",
                                     "doc_update", "doc_suggestions", "ui_control",
                                     "rounds_exhausted",
+                                    "ask_user",
+                                    "plan_update",
                                 ):
                                     if data.get("type") == "agent_step":
                                         _agent_rounds = max(_agent_rounds, data.get("round", 1))
@@ -1185,45 +1246,16 @@ def setup_chat_routes(
             return []
 
         _user = get_current_user(request)
-        query_term = q.strip()
-        db = SessionLocal()
-        try:
-            base_q = (
-                db.query(DBChatMessage, DBSession.name)
-                .join(DBSession, DBChatMessage.session_id == DBSession.id)
-                .filter(
-                    DBSession.archived == False,
-                    DBChatMessage.content.ilike(f"%{query_term}%"),
-                    DBChatMessage.role.in_(["user", "assistant"]),
-                )
+        return [
+            result.to_dict()
+            for result in search_session_messages(
+                q,
+                limit=limit,
+                owner=_user,
+                restrict_owner=_user is not None,
+                include_legacy_owner=False,
             )
-            if _user:
-                base_q = base_q.filter(DBSession.owner == _user)
-            rows = base_q.order_by(DBChatMessage.timestamp.desc()).limit(limit).all()
-
-            results = []
-            for msg, session_name in rows:
-                content = msg.content or ""
-                lower_content = content.lower()
-                idx = lower_content.find(query_term.lower())
-                if idx == -1:
-                    snippet = content[:120]
-                else:
-                    start = max(0, idx - 50)
-                    end = min(len(content), idx + len(query_term) + 50)
-                    snippet = ("..." if start > 0 else "") + content[start:end] + ("..." if end < len(content) else "")
-
-                results.append({
-                    "session_id": msg.session_id,
-                    "session_name": session_name or "Untitled",
-                    "role": msg.role,
-                    "content_snippet": snippet,
-                    "timestamp": msg.timestamp.isoformat() if msg.timestamp else None,
-                })
-
-            return results
-        finally:
-            db.close()
+        ]
 
     # ------------------------------------------------------------------ #
     # POST /api/rewrite — lightweight rewrite of last AI message (no tools)
