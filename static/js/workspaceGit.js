@@ -1467,6 +1467,84 @@ function _historyPath() {
   return state.selectedPath || null; // 'auto' and 'file' both follow selection
 }
 
+// ── Commit graph: lane layout ───────────────────────────────────────────────
+// A bounded multi-lane DAG. Lanes are reused as branches end; the count is
+// capped so a pathological repo can never blow out the gutter — overflow folds
+// into the last lane. Pure data in, pure data out: no DOM and no theme
+// knowledge (colors are applied later via .wgit-lane-{n} classes in CSS).
+const MAX_LANES = 8;
+const LANE_COLORS = 8; // palette size; colorIndex = lane % LANE_COLORS
+
+function _firstFreeLane(lanes) {
+  for (let i = 0; i < lanes.length; i++) if (lanes[i] == null) return i;
+  if (lanes.length < MAX_LANES) return lanes.length;
+  return MAX_LANES - 1; // cap reached: fold overflow into the last lane
+}
+
+// Allocate a lane per commit (newest-first) and emit the inter-row edge
+// segments needed to draw the rail. Returns { nodes, segments, usedLanes }:
+//   nodes:    [{ row, lane, colorIndex, sha, isHead }]
+//   segments: [{ row, topLane, bottomLane, colorIndex }]  (row = gap below `row`)
+function _computeGraph(commits) {
+  const lanes = [];        // frontier: lanes[k] = sha that lane k expects next
+  const nodes = [];
+  const frontiers = [];    // per row: active lanes in the gap below it
+
+  commits.forEach((commit, row) => {
+    const parents = commit.parents || [];
+    let myLane = lanes.indexOf(commit.sha);
+    if (myLane === -1) myLane = _firstFreeLane(lanes);
+    lanes[myLane] = null;  // resolved at this row
+
+    // Multi-child merge: free any *other* lane that was also waiting for us.
+    for (let k = 0; k < lanes.length; k++) {
+      if (k !== myLane && lanes[k] === commit.sha) lanes[k] = null;
+    }
+
+    // First parent keeps this lane; extra (merge) parents take other lanes.
+    const parentLanes = [];
+    parents.forEach((parentSha, idx) => {
+      let pLane = myLane;
+      if (idx > 0) {
+        pLane = lanes.indexOf(parentSha);
+        if (pLane === -1) pLane = _firstFreeLane(lanes);
+      }
+      lanes[pLane] = parentSha;
+      parentLanes.push(pLane);
+    });
+
+    const isHead = (commit.refs || []).some((r) => r.type === 'head' && r.current);
+    nodes.push({ row, lane: myLane, colorIndex: myLane % LANE_COLORS, sha: commit.sha, isHead });
+
+    const snap = [];
+    for (let k = 0; k < lanes.length; k++) {
+      if (lanes[k] == null) continue;
+      snap.push({ lane: k, sha: lanes[k], fromNode: (k === myLane) || parentLanes.includes(k) });
+    }
+    frontiers.push(snap);
+  });
+
+  // Second pass: with both gap endpoints known, route each lane's segment —
+  // straight where it passes through, bending into a node where it converges.
+  const segments = [];
+  for (let i = 0; i < frontiers.length; i++) {
+    const next = commits[i + 1];
+    for (const entry of frontiers[i]) {
+      const topLane = entry.fromNode ? nodes[i].lane : entry.lane;
+      let bottomLane = entry.lane;
+      if (next && next.sha === entry.sha && nodes[i + 1].lane !== entry.lane) {
+        bottomLane = nodes[i + 1].lane; // converge into the next node
+      }
+      segments.push({ row: i, topLane, bottomLane, colorIndex: entry.lane % LANE_COLORS });
+    }
+  }
+
+  let usedLanes = 1;
+  for (const n of nodes) usedLanes = Math.max(usedLanes, n.lane + 1);
+  for (const s of segments) usedLanes = Math.max(usedLanes, s.topLane + 1, s.bottomLane + 1);
+  return { nodes, segments, usedLanes };
+}
+
 function _renderHistory(panel) {
   panel.innerHTML = '';
   const path = _historyPath();

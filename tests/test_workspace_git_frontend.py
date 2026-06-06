@@ -645,3 +645,25 @@ def test_commit_generate_fills_textarea():
     assert idx != -1, '_generateCommitMessage missing'
     body = src[idx:idx + 1200]
     assert 'commitMessage' in body, 'generated message should populate the commit box'
+
+
+# ---------------------------------------------------------------------------
+# Commit graph — lane layout engine + rail + ref chips + commit detail
+# ---------------------------------------------------------------------------
+
+def test_history_has_lane_layout_engine():
+    src = read('static/js/workspaceGit.js')
+    assert 'function _computeGraph' in src, 'commit graph needs a _computeGraph lane allocator'
+
+
+def test_lane_layout_consumes_parents_and_refs():
+    src = read('static/js/workspaceGit.js')
+    assert '.parents' in src, 'graph must consume commit.parents'
+    assert '.refs' in src, 'history must consume commit.refs'
+
+
+def test_lane_layout_caps_lane_count():
+    src = read('static/js/workspaceGit.js')
+    assert 'MAX_LANES' in src, 'lane allocator must define a MAX_LANES cap'
+    idx = src.find('MAX_LANES')
+    assert '8' in src[idx:idx + 40], 'MAX_LANES should be 8 (overflow folds into the last lane)'
