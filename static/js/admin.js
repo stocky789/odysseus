@@ -743,9 +743,10 @@ function initEndpointForm() {
       }
       if (testBtn) testBtn.disabled = true;
       if (addBtn) {
-        addBtn.disabled = deviceAuthPolling;
-        addBtn.textContent = deviceAuthPolling ? 'Waiting...' : (deviceAuthProvider === 'copilot' ? 'Connect' : 'Sign in');
-        addBtn.style.width = deviceAuthProvider === 'copilot' ? '82px' : '76px';
+        // The device flow auto-starts on selection and the authorization panel
+        // below carries the real CTA ("Authorize…") plus the waiting state, so
+        // this button is redundant here — hide it.
+        addBtn.style.display = 'none';
       }
       if (kindSel) kindSel.value = 'api';
       if (msg) {
@@ -764,6 +765,7 @@ function initEndpointForm() {
         addBtn.disabled = false;
         addBtn.textContent = 'Add';
         addBtn.style.width = '55px';
+        addBtn.style.display = '';
       }
       if (msg) {
         msg.textContent = '';
@@ -817,6 +819,14 @@ function initEndpointForm() {
       _setApiFormForProvider();
       _renderPickerMenu();
       _syncPickerCurrent();
+      // Show the authorization panel (device code + "Authorize with OpenAI")
+      // immediately on selection, instead of making the user click "Sign in"
+      // first. The deviceAuthPolling guard keeps re-selection from spawning a
+      // second code; the button still works as a manual retry after failure.
+      const deviceAuthProvider = _selectedDeviceAuthProvider();
+      if (deviceAuthProvider && !deviceAuthPolling) {
+        _startProviderDeviceAuth(deviceAuthProvider);
+      }
       return;
     }
     if (provider.value) urlInput.value = provider.value;
@@ -1026,6 +1036,19 @@ function initEndpointForm() {
     const status = el('adm-deviceAuthStatus') || _endpointMsg('api');
     if (!status) return;
     const triggerText = triggerEl ? triggerEl.textContent : '';
+    // Render an error with an inline "Try again" (the top button is hidden for
+    // device-auth providers, so retry lives here). Built with DOM methods, not
+    // innerHTML. Call reset() first so the deviceAuthPolling guard is cleared.
+    const showAuthError = (text) => {
+      status.className = 'admin-error';
+      status.textContent = text + ' ';
+      const retry = document.createElement('button');
+      retry.type = 'button';
+      retry.className = 'admin-btn-sm';
+      retry.textContent = 'Try again';
+      retry.addEventListener('click', () => { _startProviderDeviceAuth(providerKey, triggerEl); });
+      status.appendChild(retry);
+    };
     const reset = () => {
       if (triggerEl) {
         triggerEl.disabled = false;
@@ -1052,9 +1075,6 @@ function initEndpointForm() {
           status.className = '';
           const authLabel = providerKey === 'copilot' ? 'Authorize on GitHub' : 'Authorize with OpenAI';
           const waitLabel = providerKey === 'copilot' ? 'Waiting for GitHub authorization...' : 'Waiting for ChatGPT authorization...';
-          const hint = providerKey === 'copilot'
-            ? 'Use the button above to open GitHub, then approve the device request.'
-            : 'Use the button above to open OpenAI, then enter the code to finish.';
           status.innerHTML =
             '<div class="adm-copilot-panel">' +
               '<div class="adm-copilot-wait"><span class="admin-spinner"></span>' +
@@ -1065,15 +1085,32 @@ function initEndpointForm() {
                 '<button type="button" class="admin-btn-sm adm-device-auth-copy">Copy</button>' +
               '</div>' +
               '<a class="admin-btn-add adm-copilot-auth" href="' + encodeURI(authUrl || '') + '" target="_blank" rel="noopener">' + esc(authLabel) + ' ↗</a>' +
-              '<div class="adm-copilot-hint">' + esc(hint) + '</div>' +
             '</div>';
           const copyBtn = status.querySelector('.adm-device-auth-copy');
           if (copyBtn) copyBtn.addEventListener('click', async () => {
+            const code = start.user_code || '';
+            let ok = false;
             try {
-              await navigator.clipboard.writeText(start.user_code || '');
-              copyBtn.textContent = 'Copied';
-              setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1500);
+              if (navigator.clipboard && window.isSecureContext) {
+                await navigator.clipboard.writeText(code);
+                ok = true;
+              }
             } catch (e) {}
+            if (!ok) {
+              // navigator.clipboard is unavailable in non-secure contexts (HTTP
+              // self-host over a LAN IP), so fall back to execCommand('copy').
+              const ta = document.createElement('textarea');
+              ta.value = code;
+              ta.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;padding:0;border:0;opacity:0;font-size:16px;';
+              document.body.appendChild(ta);
+              ta.focus();
+              ta.select();
+              try { ta.setSelectionRange(0, code.length); } catch (e) {}
+              try { ok = document.execCommand('copy'); } catch (e) {}
+              ta.remove();
+            }
+            copyBtn.textContent = ok ? 'Copied' : 'Failed';
+            setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1500);
           });
         },
       });
@@ -1089,21 +1126,18 @@ function initEndpointForm() {
         return;
       }
       if (result.status === 'failed') {
-        status.className = 'admin-error';
-        status.textContent = 'Authorization failed (' + (result.error || 'denied') + ').';
         reset();
+        showAuthError('Authorization failed (' + (result.error || 'denied') + ').');
         return;
       }
       if (result.status === 'expired') {
-        status.className = 'admin-error';
-        status.textContent = 'Authorization expired - try again.';
         reset();
+        showAuthError('Authorization expired.');
         return;
       }
     } catch (e) {
-      status.textContent = formatDeviceFlowError(e);
-      status.className = 'admin-error';
       reset();
+      showAuthError(formatDeviceFlowError(e));
     }
   }
 
