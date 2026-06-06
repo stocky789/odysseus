@@ -1602,10 +1602,17 @@ async function _loadBlame(path, body) {
   // so per-row appends to the live tree would thrash layout.
   const frag = document.createDocumentFragment();
   lines.forEach((ln, i) => {
-    frag.appendChild(_h('div', { class: 'wgit-blame-row' }, [
+    const sha = String(ln.sha || '');
+    // git uses an all-zero SHA for lines not in any commit yet.
+    const uncommitted = /^0+$/.test(sha);
+    frag.appendChild(_h('div', { class: `wgit-blame-row${uncommitted ? ' is-uncommitted' : ''}` }, [
       _h('span', { class: 'wgit-blame-num', text: String(i + 1) }),
-      _h('span', { class: 'wgit-blame-sha', title: ln.sha || '', text: _shortSha(ln.sha) }),
-      _h('span', { class: 'wgit-blame-author', title: ln.author || '', text: ln.author || '' }),
+      _h('span', {
+        class: 'wgit-blame-sha',
+        title: uncommitted ? 'Uncommitted — not in any commit yet' : sha,
+        text: uncommitted ? 'U' : _shortSha(sha),
+      }),
+      _h('span', { class: 'wgit-blame-author', title: ln.author || '', text: uncommitted ? 'Uncommitted' : (ln.author || '') }),
       _h('span', { class: 'wgit-blame-text', text: ln.text != null ? ln.text : '' }),
     ]));
   });

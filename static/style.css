@@ -37134,6 +37134,9 @@ body.theme-frosted .modal {
 .wgit-blame-row:hover { background: color-mix(in srgb, var(--border) 18%, transparent); }
 .wgit-blame-num { color: color-mix(in srgb, var(--fg-muted) 70%, transparent); text-align: right; user-select: none; }
 .wgit-blame-sha { color: color-mix(in srgb, var(--accent, var(--red)) 80%, var(--fg)); overflow: hidden; text-overflow: ellipsis; }
+/* Uncommitted lines: a single-letter badge instead of the all-zero SHA. */
+.wgit-blame-row.is-uncommitted .wgit-blame-sha { color: var(--color-warning); font-weight: 700; }
+.wgit-blame-row.is-uncommitted .wgit-blame-author { font-style: italic; opacity: 0.8; }
 .wgit-blame-author { color: var(--fg-muted); overflow: hidden; text-overflow: ellipsis; }
 .wgit-blame-text { white-space: pre; overflow: hidden; text-overflow: ellipsis; color: var(--fg); }
 @media (prefers-reduced-motion: reduce) { .wgit-scope-btn { transition: none; } }
