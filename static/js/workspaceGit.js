@@ -7,6 +7,7 @@
 
 import uiModule from './ui.js';
 import workspaceModule from './workspace.js';
+import sessionModule from './sessions.js';
 import { makeWindowDraggable } from './windowDrag.js';
 
 const TABS = [
@@ -33,6 +34,7 @@ const ICON = {
   up: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 15-6-6-6 6"/></svg>',
   wrap: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M3 12h15a3 3 0 1 1 0 6h-4"/><path d="m15 15-2 3 2 3"/><path d="M3 18h6"/></svg>',
   caret: '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>',
+  sparkle: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.7 4.6L18 9.3l-4.3 1.7L12 16l-1.7-4.9L6 9.3l4.3-1.7z"/><path d="M19 14l.9 2.3L22 17l-2.1.7L19 20l-.9-2.3L16 17l2.1-.7z"/></svg>',
   check: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>',
   close: '✖',
 };
@@ -52,6 +54,7 @@ const EP = {
   checkout: '/api/workspace/git/checkout',
   checkoutStash: '/api/workspace/git/checkout-stash',
   branchCreate: '/api/workspace/git/branch/create',
+  commitMessage: '/api/workspace/git/commit-message',
   fetch: '/api/workspace/git/fetch',
   pull: '/api/workspace/git/pull',
   push: '/api/workspace/git/push',
@@ -482,6 +485,35 @@ async function _commitSelected() {
   if (ok) { state.commitMessage = ''; uiModule.showToast('Committed selected file'); }
 }
 
+// Draft a commit message from the staged diff using the model selected in chat.
+async function _generateCommitMessage() {
+  if (!state.workspace) { uiModule.showError('Select a workspace first'); return; }
+  const btn = _modal && _modal.querySelector('#wgit-commit-gen');
+  const label = btn && btn.querySelector('.wgit-gen-label');
+  if (btn) btn.disabled = true;
+  if (label) label.textContent = 'Generating…';
+  let data;
+  try {
+    const sessionId = (sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId()) || null;
+    data = await gitApi(EP.commitMessage, { method: 'POST', body: { workspace: state.workspace, sessionId } });
+  } catch (err) {
+    if (btn) btn.disabled = false;
+    if (label) label.textContent = 'Generate';
+    uiModule.showError(err.message || 'Could not generate a commit message');
+    return;
+  }
+  if (btn) btn.disabled = false;
+  if (label) label.textContent = 'Generate';
+  const message = (data && data.message) || '';
+  if (!message) { uiModule.showError('The model returned an empty message'); return; }
+  // Replace the commit box with the fresh draft (user can edit before committing).
+  state.commitMessage = message;
+  const ta = _modal && _modal.querySelector('#wgit-commit-msg');
+  if (ta) ta.value = message;
+  _syncCommitButtons();
+  if (data && data.truncated) uiModule.showToast('Message drafted (large diff was truncated)');
+}
+
 // ── Changes tab ─────────────────────────────────────────────────────────────
 
 function _groupChanges(files) {
@@ -602,9 +634,16 @@ function _renderChanges(panel) {
     type: 'button', class: 'memory-toolbar-btn wgit-commit-selected-btn', id: 'wgit-commit-selected-btn',
     text: 'Commit selected', onclick: () => _commitSelected(),
   });
+  // AI draft using the model selected in chat. Left-aligned (margin-right:auto
+  // in CSS) so the commit buttons stay on the right.
+  const genBtn = _h('button', {
+    type: 'button', class: 'memory-toolbar-btn wgit-commit-gen', id: 'wgit-commit-gen',
+    title: 'Generate a commit message with the chat model',
+    onclick: () => _generateCommitMessage(),
+  }, [_h('span', { class: 'wgit-gen-icon', unsafeHtml: ICON.sparkle }), _h('span', { class: 'wgit-gen-label', text: 'Generate' })]);
   const commit = _h('div', { class: 'wgit-commit' }, [
     msg,
-    _h('div', { class: 'wgit-commit-actions' }, [commitSelBtn, commitBtn]),
+    _h('div', { class: 'wgit-commit-actions' }, [genBtn, commitSelBtn, commitBtn]),
   ]);
 
   panel.append(layout, commit);
@@ -1759,18 +1798,6 @@ function _renderBranchMenu() {
   });
   el.appendChild(_h('div', { class: 'wgit-branch-search-wrap' }, [search]));
   el.appendChild(_h('div', { class: 'wgit-branch-list', id: 'wgit-branch-list' }));
-  el.appendChild(_h('button', {
-    type: 'button', class: 'wgit-branch-fetch',
-    onclick: async (e) => {
-      const fb = e.currentTarget; fb.disabled = true; fb.textContent = 'Fetching…';
-      try {
-        await gitApi(EP.fetch, { method: 'POST', body: { workspace: state.workspace } });
-        uiModule.showToast('Fetched');
-      } catch (err) { uiModule.showError(err.message || 'Fetch failed'); }
-      state.branches = null;
-      await _loadBranches();
-    },
-  }, [_h('span', { unsafeHtml: ICON.fetch }), 'Fetch']));
   _positionBranchMenu();
   _renderBranchList();
   requestAnimationFrame(() => { const s = document.getElementById('wgit-branch-search'); if (s) s.focus(); });
@@ -1841,30 +1868,21 @@ async function _checkoutBranch(ref, mode) {
   _setBusy(true);
   let data;
   try {
-    data = await gitApi(EP.checkout, { method: 'POST', body: { workspace: state.workspace, branch: target } });
+    // Seamless per-branch switch: auto-parks the current branch's uncommitted
+    // changes (tagged to that branch) and restores the target branch's
+    // previously-parked changes on arrival. See git_checkout (backend).
+    data = await gitApi(EP.checkoutStash, { method: 'POST', body: { workspace: state.workspace, branch: target } });
   } catch (err) {
     _setBusy(false);
-    if (err.code === 'dirty_worktree') {
-      const ok = await uiModule.styledConfirm(
-        `You have uncommitted changes. Stash them and switch to “${target}”?`,
-        { confirmText: 'Stash & switch', cancelText: 'Cancel' },
-      );
-      if (!ok) return;
-      _setBusy(true);
-      try {
-        data = await gitApi(EP.checkoutStash, { method: 'POST', body: { workspace: state.workspace, branch: target } });
-      } catch (err2) {
-        _setBusy(false);
-        uiModule.showError(err2.message || 'Could not switch branch');
-        return;
-      }
-    } else {
-      uiModule.showError(err.message || 'Could not switch branch');
-      return;
-    }
+    uiModule.showError(err.message || 'Could not switch branch');
+    return;
   }
   _setBusy(false);
-  _afterBranchChange(target, data && data.stashed ? ' · changes stashed' : '');
+  const note = [];
+  if (data && data.stashed) note.push('parked your changes');
+  if (data && data.restored) note.push('restored changes here');
+  if (data && data.restoreFailed) note.push('restore conflict — check git stash');
+  _afterBranchChange(target, note.length ? ` · ${note.join(' · ')}` : '');
 }
 
 async function _createBranch(name) {

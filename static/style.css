@@ -36824,11 +36824,21 @@ body.theme-frosted .modal {
 .wgit-commit-msg:focus { outline: none; border-color: var(--accent, var(--red)); }
 .wgit-commit-actions {
   display: flex;
+  align-items: center;
   justify-content: flex-end;
   gap: 8px;
   margin-top: 8px;
 }
 .wgit-commit-actions button:disabled { opacity: 0.45; cursor: default; }
+/* AI "Generate" sits on the left; commit buttons stay on the right. */
+.wgit-commit-gen {
+  margin-right: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.wgit-commit-gen .wgit-gen-icon { display: inline-flex; color: var(--accent, var(--red)); }
+.wgit-commit-gen:disabled { opacity: 0.6; cursor: progress; }
 
 /* ── Git panel: Files tab + editor ────────────────────────────────── */
 .wgit-files {
@@ -37317,22 +37327,4 @@ body.theme-frosted .modal {
 .wgit-branch-create:hover { background: color-mix(in srgb, var(--accent, var(--red)) 12%, transparent); }
 .wgit-branch-create { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .wgit-branch-empty { padding: 14px 10px; color: var(--fg-muted); font-size: 12px; text-align: center; }
-.wgit-branch-fetch {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  width: 100%;
-  margin-top: 4px;
-  padding: 6px 8px;
-  border: none;
-  border-top: 1px solid var(--border);
-  background: none;
-  color: var(--fg-muted);
-  cursor: pointer;
-  font-family: inherit;
-  font-size: 12px;
-}
-.wgit-branch-fetch:hover { color: var(--fg); }
-.wgit-branch-fetch svg { width: 13px; height: 13px; }
 @media (prefers-reduced-motion: reduce) { .wgit-branch { transition: none; } }
