@@ -578,11 +578,17 @@ def test_branch_checkout_uses_checkout_endpoint():
     assert '/api/workspace/git/checkout' in src
 
 
-def test_branch_dirty_prompts_stash():
+def test_branch_switch_is_seamless_autostash_restore():
     src = read('static/js/workspaceGit.js')
-    assert 'dirty_worktree' in src, 'must detect a dirty worktree on checkout'
-    assert '/api/workspace/git/checkout-stash' in src, 'must offer stash-and-switch'
-    assert 'styledConfirm' in src
+    # Switching always uses the per-branch auto-stash + restore checkout path
+    # (no dirty prompt): leaving parks the branch's changes, arriving restores
+    # that branch's previously-parked changes.
+    assert '/api/workspace/git/checkout-stash' in src, 'switch must use the autostash+restore path'
+    idx = src.find('async function _checkoutBranch')
+    assert idx != -1
+    body = src[idx:idx + 1200]
+    assert 'EP.checkoutStash' in body, 'checkout must go through the autostash+restore endpoint'
+    assert 'restored' in body, 'switch toast should surface restored changes'
 
 
 def test_branch_checkout_guards_unsaved_and_refreshes():
@@ -611,3 +617,31 @@ def test_branch_menu_portaled_fixed_to_avoid_clipping():
     idx = css.find('.wgit-branch-menu')
     assert idx != -1, 'branch menu styles missing'
     assert 'position: fixed' in css[idx:idx + 200], 'branch menu must be fixed-position (portaled) to avoid clipping'
+
+
+# ---------------------------------------------------------------------------
+# AI commit-message generation (chat-selected model)
+# ---------------------------------------------------------------------------
+
+def test_commit_message_endpoint_used():
+    src = read('static/js/workspaceGit.js')
+    assert '/api/workspace/git/commit-message' in src, 'commit-message endpoint not called'
+
+
+def test_commit_generate_button_present():
+    src = read('static/js/workspaceGit.js')
+    assert 'wgit-commit-gen' in src, 'Generate commit-message button missing'
+
+
+def test_commit_generate_uses_chat_session_model():
+    src = read('static/js/workspaceGit.js')
+    assert "from './sessions.js'" in src, 'must import the sessions module'
+    assert 'getCurrentSessionId' in src, 'must send the current chat session id'
+
+
+def test_commit_generate_fills_textarea():
+    src = read('static/js/workspaceGit.js')
+    idx = src.find('async function _generateCommitMessage')
+    assert idx != -1, '_generateCommitMessage missing'
+    body = src[idx:idx + 1200]
+    assert 'commitMessage' in body, 'generated message should populate the commit box'
