@@ -203,6 +203,7 @@ def try_fallback_endpoint(sess, session_id: str) -> dict | None:
         normalize_base,
         resolve_endpoint_runtime,
     )
+    from src.chatgpt_subscription import is_chatgpt_subscription_base
 
     current_url = sess.endpoint_url or ""
     owner = getattr(sess, "owner", None)
@@ -249,6 +250,7 @@ def try_fallback_endpoint(sess, session_id: str) -> dict | None:
             new_model = models[0]
             chat_url = build_chat_url(base)
             new_headers = build_headers(api_key, base)
+            persisted_headers = {} if is_chatgpt_subscription_base(base) else new_headers
 
             sess.model = new_model
             sess.endpoint_url = chat_url
@@ -260,7 +262,7 @@ def try_fallback_endpoint(sess, session_id: str) -> dict | None:
                 _db.query(DBSession).filter(DBSession.id == session_id).update({
                     "model": new_model,
                     "endpoint_url": chat_url,
-                    "headers": new_headers,
+                    "headers": persisted_headers,
                 })
                 _db.commit()
             finally:

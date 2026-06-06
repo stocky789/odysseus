@@ -94,11 +94,11 @@ def _reject_compact_during_active_run(session_id: str) -> None:
 def _verify_session_owner(request: Request, session_id: str, session_manager=None):
     """Verify the current user owns the session, honoring single-user modes.
 
-    When auth is disabled (or an allowed first-run/localhost bypass is active),
-    ``require_user`` returns an empty string. Treat that as single-user mode:
-    verify the session exists, but do not compare its stored owner. This keeps
-    QA/dev instances with AUTH_ENABLED=false from 403-ing owner-stamped rows
-    created while auth was previously enabled.
+    Authenticated requests must match the stored DB or in-memory owner. When
+    auth is disabled and no user is present, treat the app as single-user mode:
+    verify that the session exists, but do not compare its stored owner. This
+    keeps QA/dev instances with AUTH_ENABLED=false from rejecting owner-stamped
+    rows created while auth was previously enabled.
     """
     user = effective_user(request)
     if not user and not _auth_disabled():

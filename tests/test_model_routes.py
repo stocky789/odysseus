@@ -11,49 +11,51 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from tests.helpers.import_state import clear_fake_endpoint_resolver_modules
+from tests.helpers.import_state import clear_fake_endpoint_resolver_modules, preserve_import_state
 
-# Other tests stub this module during collection. These helper tests need
-# the real URL normalization helpers so Anthropic /v1 handling is covered.
-clear_fake_endpoint_resolver_modules()
+with preserve_import_state("core.database", "src.database", "core.session_manager", "routes.model_routes"):
+    # Other tests stub this module during collection. These helper tests need
+    # the real URL normalization helpers so Anthropic /v1 handling is covered.
+    clear_fake_endpoint_resolver_modules()
 
-if "core.database" not in sys.modules:
-    _core_db = types.ModuleType("core.database")
-    for _name in [
-        "SessionLocal", "ModelEndpoint", "Session", "ChatMessage", "Document",
-        "DocumentVersion", "GalleryImage", "GalleryAlbum", "Note",
-        "CalendarCal", "CalendarEvent", "ScheduledTask", "TaskRun",
-        "McpServer",
-    ]:
-        setattr(_core_db, _name, MagicMock())
-    sys.modules["core.database"] = _core_db
+    if "core.database" not in sys.modules:
+        _core_db = types.ModuleType("core.database")
+        for _name in [
+            "SessionLocal", "ModelEndpoint", "Session", "ChatMessage", "Document",
+            "DocumentVersion", "GalleryImage", "GalleryAlbum", "Note",
+            "CalendarCal", "CalendarEvent", "ScheduledTask", "TaskRun",
+            "McpServer", "ProviderAuthSession", "Base",
+        ]:
+            setattr(_core_db, _name, MagicMock())
+        _core_db.utcnow_naive = MagicMock()
+        sys.modules["core.database"] = _core_db
 
-import routes.model_routes as model_routes
-import src.database as src_database
-import src.endpoint_resolver as endpoint_resolver
-import src.llm_core as llm_core
-from routes.model_routes import (
-    _match_provider_curated,
-    _curate_models,
-    _visible_models,
-    _normalize_model_ids,
-    _api_key_fingerprint,
-    _is_chat_model,
-    _classify_endpoint,
-    _effective_endpoint_kind,
-    _probe_endpoint,
-    _ping_endpoint,
-    _parse_model_list,
-    _normalize_refresh_mode,
-    _truthy,
-    _speech_settings_using_endpoint,
-    _clear_speech_settings_for_endpoint,
-    _endpoint_settings_using_endpoint,
-    _clear_endpoint_settings_for_endpoint,
-    _clear_user_pref_endpoint_refs,
-    _PROVIDER_CURATED,
-)
-from src.llm_core import ANTHROPIC_MODELS
+    import routes.model_routes as model_routes
+    import src.database as src_database
+    import src.endpoint_resolver as endpoint_resolver
+    import src.llm_core as llm_core
+    from routes.model_routes import (
+        _match_provider_curated,
+        _curate_models,
+        _visible_models,
+        _normalize_model_ids,
+        _api_key_fingerprint,
+        _is_chat_model,
+        _classify_endpoint,
+        _effective_endpoint_kind,
+        _probe_endpoint,
+        _ping_endpoint,
+        _parse_model_list,
+        _normalize_refresh_mode,
+        _truthy,
+        _speech_settings_using_endpoint,
+        _clear_speech_settings_for_endpoint,
+        _endpoint_settings_using_endpoint,
+        _clear_endpoint_settings_for_endpoint,
+        _clear_user_pref_endpoint_refs,
+        _PROVIDER_CURATED,
+    )
+    from src.llm_core import ANTHROPIC_MODELS
 
 
 # ── speech endpoint settings ──
@@ -687,8 +689,7 @@ class _PinnedFakeRequest:
 
 
 def _get_route(path, method):
-    from routes.model_routes import setup_model_routes
-    router = setup_model_routes(model_discovery=None)
+    router = model_routes.setup_model_routes(model_discovery=None)
     for route in router.routes:
         if getattr(route, "path", "") == path and method in getattr(route, "methods", set()):
             return route.endpoint

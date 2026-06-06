@@ -25,33 +25,36 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 
-from tests.helpers.import_state import clear_fake_endpoint_resolver_modules
+from tests.helpers.import_state import clear_fake_endpoint_resolver_modules, preserve_import_state
 
-# Match test_model_routes.py: if another test stubbed src.endpoint_resolver
-# during collection, drop the stub so the real URL helpers load here.
-clear_fake_endpoint_resolver_modules()
+with preserve_import_state("core.database", "src.database", "core.session_manager", "routes.model_routes"):
+    # Match test_model_routes.py: if another test stubbed src.endpoint_resolver
+    # during collection, drop the stub so the real URL helpers load here.
+    clear_fake_endpoint_resolver_modules()
 
-if "core.database" not in sys.modules:
-    _core_db = types.ModuleType("core.database")
-    for _name in [
-        "SessionLocal", "ModelEndpoint", "Session", "ChatMessage", "Document",
-        "DocumentVersion", "GalleryImage", "GalleryAlbum", "Note",
-        "CalendarCal", "CalendarEvent", "ScheduledTask", "TaskRun", "McpServer",
-    ]:
-        setattr(_core_db, _name, MagicMock())
-    sys.modules["core.database"] = _core_db
+    if "core.database" not in sys.modules:
+        _core_db = types.ModuleType("core.database")
+        for _name in [
+            "SessionLocal", "ModelEndpoint", "Session", "ChatMessage", "Document",
+            "DocumentVersion", "GalleryImage", "GalleryAlbum", "Note",
+            "CalendarCal", "CalendarEvent", "ScheduledTask", "TaskRun", "McpServer",
+            "ProviderAuthSession", "Base",
+        ]:
+            setattr(_core_db, _name, MagicMock())
+        _core_db.utcnow_naive = MagicMock()
+        sys.modules["core.database"] = _core_db
 
-import routes.model_routes as model_routes
-import src.endpoint_resolver as endpoint_resolver
-from routes.model_routes import (
-    _probe_endpoint,
-    _ping_endpoint,
-    _probe_single_model,
-    _resolve_probe_key,
-    _classify_endpoint,
-    _rewrite_loopback_for_docker,
-    _PROVIDER_CURATED,
-)
+    import routes.model_routes as model_routes
+    import src.endpoint_resolver as endpoint_resolver
+    from routes.model_routes import (
+        _probe_endpoint,
+        _ping_endpoint,
+        _probe_single_model,
+        _resolve_probe_key,
+        _classify_endpoint,
+        _rewrite_loopback_for_docker,
+        _PROVIDER_CURATED,
+    )
 
 
 def _patch_resolve(monkeypatch):

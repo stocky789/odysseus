@@ -743,10 +743,10 @@ function initEndpointForm() {
       }
       if (testBtn) testBtn.disabled = true;
       if (addBtn) {
-        // The device flow auto-starts on selection and the authorization panel
-        // below carries the real CTA ("Authorize…") plus the waiting state, so
-        // this button is redundant here — hide it.
-        addBtn.style.display = 'none';
+        addBtn.disabled = false;
+        addBtn.textContent = 'Add';
+        addBtn.style.width = '55px';
+        addBtn.style.display = '';
       }
       if (kindSel) kindSel.value = 'api';
       if (msg) {
@@ -819,14 +819,6 @@ function initEndpointForm() {
       _setApiFormForProvider();
       _renderPickerMenu();
       _syncPickerCurrent();
-      // Show the authorization panel (device code + "Authorize with OpenAI")
-      // immediately on selection, instead of making the user click "Sign in"
-      // first. The deviceAuthPolling guard keeps re-selection from spawning a
-      // second code; the button still works as a manual retry after failure.
-      const deviceAuthProvider = _selectedDeviceAuthProvider();
-      if (deviceAuthProvider && !deviceAuthPolling) {
-        _startProviderDeviceAuth(deviceAuthProvider);
-      }
       return;
     }
     if (provider.value) urlInput.value = provider.value;
