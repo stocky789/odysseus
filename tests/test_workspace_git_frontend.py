@@ -734,3 +734,13 @@ def test_commit_detail_files_css_present():
     css = read('static/style.css')
     for cls in ('.wgit-commit-summary', '.wgit-commit-file'):
         assert cls in css, f'{cls} CSS missing'
+
+
+def test_diff_hunk_header_shown_in_plain_english():
+    src = read('static/js/workspaceGit.js')
+    assert 'function _hunkSummary' in src, 'hunk headers should be summarized in plain English'
+    # The diff view renders the plain-English summary as the visible hunk label,
+    # keeping the raw @@ header available on hover (title).
+    assert '_hunkSummary(hunk)' in src, 'the hunk head must render the plain-English summary'
+    for word in ("Added ", "Removed ", "Changed "):
+        assert word in src, f'plain-English hunk summary missing {word!r}'

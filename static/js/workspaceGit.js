@@ -740,6 +740,20 @@ function _renderDiff(pane, data, path, staged) {
   pane.appendChild(frag);
 }
 
+// Turn a unified-diff hunk header (e.g. "@@ -0,0 +1,100 @@") into plain English.
+// The raw header stays available on hover for anyone who wants the exact notation.
+function _hunkSummary(hunk) {
+  const oldStart = Number(hunk.oldStart) || 0;
+  const oldLines = Number(hunk.oldLines) || 0;
+  const newStart = Number(hunk.newStart) || 0;
+  const newLines = Number(hunk.newLines) || 0;
+  if (!newStart && !oldStart) return hunk.header || '';
+  const span = (start, count) => (count <= 1 ? `line ${start}` : `lines ${start}–${start + count - 1}`);
+  if (oldLines === 0 && newLines > 0) return `Added ${span(newStart, newLines)}`;
+  if (newLines === 0 && oldLines > 0) return `Removed ${span(oldStart, oldLines)}`;
+  return `Changed ${span(newStart, newLines)}`;
+}
+
 function _renderHunk(hunk, path, staged) {
   const headBtn = staged
     ? _h('button', {
@@ -751,7 +765,7 @@ function _renderHunk(hunk, path, staged) {
         title: 'Stage this hunk', onclick: () => _stageHunk(path, hunk.id),
       });
   const head = _h('div', { class: 'wgit-hunk-head' }, [
-    _h('span', { class: 'wgit-hunk-header', text: hunk.header }),
+    _h('span', { class: 'wgit-hunk-header', title: hunk.header, text: _hunkSummary(hunk) }),
     headBtn,
   ]);
   const body = _h('div', { class: 'wgit-hunk-lines' });
