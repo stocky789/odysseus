@@ -744,3 +744,34 @@ def test_diff_hunk_header_shown_in_plain_english():
     assert '_hunkSummary(hunk)' in src, 'the hunk head must render the plain-English summary'
     for word in ("Added ", "Removed ", "Changed "):
         assert word in src, f'plain-English hunk summary missing {word!r}'
+
+
+def test_commit_clears_message_before_status_refresh():
+    src = read('static/js/workspaceGit.js')
+    idx = src.find('async function _commitStaged')
+    assert idx != -1, '_commitStaged missing'
+    body = src[idx:idx + 800]
+    # The message must be cleared inside the _mutate callback (before its status
+    # refresh re-renders the commit box), not after _mutate returns.
+    clear_pos = body.find("state.commitMessage = ''")
+    ok_pos = body.find('if (ok)')
+    assert clear_pos != -1 and ok_pos != -1
+    assert clear_pos < ok_pos, 'commit message must clear before the status refresh, not after'
+
+
+def test_files_tab_delete_control():
+    src = read('static/js/workspaceGit.js')
+    assert 'wgit-file-del' in src, 'file rows need a delete control'
+    assert '/api/workspace/file/delete' in src, 'delete must call the file-delete endpoint'
+    assert 'function _deleteFile' in src, '_deleteFile missing'
+    # delete is on both folder and file rows
+    assert '_deleteBtn(d.path' in src and '_deleteBtn(f.path' in src
+    # destructive → confirmed with danger styling
+    idx = src.find('async function _deleteFile')
+    body = src[idx:idx + 600]
+    assert 'styledConfirm' in body and 'danger: true' in body
+
+
+def test_files_delete_css_present():
+    css = read('static/style.css')
+    assert '.wgit-file-del' in css, 'delete-control styles missing'
