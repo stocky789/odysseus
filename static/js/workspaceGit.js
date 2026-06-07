@@ -1542,6 +1542,7 @@ function _computeGraph(commits) {
   const lanes = [];        // frontier: lanes[k] = sha that lane k expects next
   const nodes = [];
   const frontiers = [];    // per row: active lanes in the gap below it
+  const mergeEdges = [];   // per row: already-flowing lanes a merge joins this row
 
   commits.forEach((commit, row) => {
     const parents = commit.parents || [];
@@ -1554,16 +1555,17 @@ function _computeGraph(commits) {
       if (k !== myLane && lanes[k] === commit.sha) lanes[k] = null;
     }
 
-    // First parent keeps this lane; extra (merge) parents take other lanes.
-    const parentLanes = [];
+    // Place parents. First parent keeps this lane. A merge parent needing a fresh
+    // lane branches off this node (originLanes). A merge parent that joins a lane
+    // already flowing toward it keeps that lane's vertical AND gets its own merge
+    // edge (mergeLanes) — otherwise the joined lane's line would break at this row.
+    const originLanes = [];
+    const mergeLanes = [];
     parents.forEach((parentSha, idx) => {
-      let pLane = myLane;
-      if (idx > 0) {
-        pLane = lanes.indexOf(parentSha);
-        if (pLane === -1) pLane = _firstFreeLane(lanes);
-      }
-      lanes[pLane] = parentSha;
-      parentLanes.push(pLane);
+      if (idx === 0) { lanes[myLane] = parentSha; originLanes.push(myLane); return; }
+      let pLane = lanes.indexOf(parentSha);
+      if (pLane === -1) { pLane = _firstFreeLane(lanes); lanes[pLane] = parentSha; originLanes.push(pLane); }
+      else { lanes[pLane] = parentSha; mergeLanes.push(pLane); }
     });
 
     const isHead = (commit.refs || []).some((r) => r.type === 'head' && r.current);
@@ -1572,9 +1574,10 @@ function _computeGraph(commits) {
     const snap = [];
     for (let k = 0; k < lanes.length; k++) {
       if (lanes[k] == null) continue;
-      snap.push({ lane: k, sha: lanes[k], fromNode: (k === myLane) || parentLanes.includes(k) });
+      snap.push({ lane: k, sha: lanes[k], fromNode: originLanes.includes(k) });
     }
     frontiers.push(snap);
+    mergeEdges.push(mergeLanes);
   });
 
   // Second pass: with both gap endpoints known, route each lane's segment —
@@ -1589,6 +1592,11 @@ function _computeGraph(commits) {
         bottomLane = nodes[i + 1].lane; // converge into the next node
       }
       segments.push({ row: i, topLane, bottomLane, colorIndex: entry.lane % LANE_COLORS });
+    }
+    // Merge edges: curve from this node into a lane that was already flowing,
+    // on top of that lane's own (unbroken) vertical.
+    for (const pLane of mergeEdges[i]) {
+      segments.push({ row: i, topLane: nodes[i].lane, bottomLane: pLane, colorIndex: pLane % LANE_COLORS });
     }
   }
 
