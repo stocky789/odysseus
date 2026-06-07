@@ -538,6 +538,39 @@ export function shortModel(name) {
   return short;
 }
 
+function modelValue(name) {
+  if (name == null) return '';
+  return String(name).trim();
+}
+
+export function sameModelName(left, right) {
+  const a = modelValue(left);
+  const b = modelValue(right);
+  if (!a || !b) return false;
+  return a.toLowerCase() === b.toLowerCase()
+    || shortModel(a).toLowerCase() === shortModel(b).toLowerCase();
+}
+
+export function modelRouteLabel(requestedModel, actualModel) {
+  const requested = modelValue(requestedModel);
+  const actual = modelValue(actualModel) || requested;
+  if (!requested || sameModelName(requested, actual)) return shortModel(actual || requested);
+  return shortModel(requested) + ' -> ' + shortModel(actual);
+}
+
+export function replyModelPair(modelName, metadata) {
+  const meta = metadata || {};
+  const actualFromMeta = modelValue(meta.model || meta.actual_model);
+  const requestedFromMeta = modelValue(meta.requested_model || meta.selected_model);
+  if (actualFromMeta || requestedFromMeta) {
+    const actual = actualFromMeta || requestedFromMeta || modelValue(modelName);
+    const requested = requestedFromMeta || actual;
+    return { requestedModel: requested, actualModel: actual };
+  }
+  const fallback = modelValue(modelName);
+  return { requestedModel: fallback, actualModel: fallback };
+}
+
 /**
  * Generate a consistent HSL color for a model name.
  * Returns an hsl() string. The hue is derived from a string hash,
@@ -578,7 +611,11 @@ export function applyModelColor(roleEl, modelName) {
   }
   // Replace generic dot with provider logo if available
   const logo = providerLogo(modelName);
-  if (logo && !roleEl.querySelector('.role-provider-logo')) {
+  const existingLogo = roleEl.querySelector('.role-provider-logo');
+  if (!logo) {
+    if (existingLogo) existingLogo.remove();
+    roleEl.classList.remove('has-logo');
+  } else if (!existingLogo) {
     const span = document.createElement('span');
     span.className = 'role-provider-logo';
     span.innerHTML = logo;
@@ -1956,8 +1993,12 @@ export function addMessage(role, content, modelName, metadata) {
           wrap.className = 'msg msg-ai' + (r > 0 ? ' msg-continuation' : '');
           const roleEl = document.createElement('div');
           roleEl.className = 'role';
-          const contModel = modelName || metadata?.model;
-          roleEl.textContent = shortModel(contModel);
+          const pair = replyModelPair(modelName, metadata);
+          const contModel = pair.actualModel || pair.requestedModel;
+          roleEl.textContent = modelRouteLabel(pair.requestedModel, contModel);
+          if (pair.requestedModel && contModel && !sameModelName(pair.requestedModel, contModel)) {
+            roleEl.title = pair.requestedModel + ' -> ' + contModel;
+          }
           applyModelColor(roleEl, contModel);
           if (r === 0) roleEl.appendChild(roleTimestamp(metadata?.timestamp));
           wrap.appendChild(roleEl);
@@ -2062,8 +2103,9 @@ export function addMessage(role, content, modelName, metadata) {
     r.className = 'role';
     const isSlash = metadata?.source === 'slash';
     const isCompacted = metadata?.compacted;
-    const resolvedModel = modelName || metadata?.model;
-    var _roleText = role === 'user' ? 'You' : (isSlash || isCompacted) ? 'Odysseus' : shortModel(resolvedModel);
+    const replyModels = replyModelPair(modelName, metadata);
+    const resolvedModel = replyModels.actualModel || replyModels.requestedModel;
+    var _roleText = role === 'user' ? 'You' : (isSlash || isCompacted) ? 'Odysseus' : modelRouteLabel(replyModels.requestedModel, resolvedModel);
     if (role === 'assistant' && (metadata?.research || metadata?.research_clarification)) {
       _roleText += ' (Research)';
     }
@@ -2074,6 +2116,9 @@ export function addMessage(role, content, modelName, metadata) {
     }
     r.textContent = _roleText;
     if (role !== 'user') {
+      if (!isSlash && !isCompacted && replyModels.requestedModel && resolvedModel && !sameModelName(replyModels.requestedModel, resolvedModel)) {
+        r.title = replyModels.requestedModel + ' -> ' + resolvedModel;
+      }
       if (!isSlash && !isCompacted) applyModelColor(r, resolvedModel);
       r.appendChild(roleTimestamp(metadata?.timestamp));
     }
@@ -2340,6 +2385,9 @@ export function addMessage(role, content, modelName, metadata) {
 
 const chatRenderer = {
   shortModel,
+  sameModelName,
+  modelRouteLabel,
+  replyModelPair,
   modelColor,
   applyModelColor,
   getModelCost,
