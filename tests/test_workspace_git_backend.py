@@ -1017,3 +1017,104 @@ def test_commit_stat_endpoint_rejects_invalid_sha(monkeypatch, tmp_path):
         body = response.json()
         assert body["ok"] is False
         assert body["code"]
+
+
+def test_commit_message_refreshes_session_auth_like_chat(monkeypatch, tmp_path):
+    """A ChatGPT-Subscription chat session stores no persisted bearer (it is
+    short-lived and re-resolved per request). Commit-message generation must
+    refresh the session's auth the same way the chat path does, otherwise the
+    model call goes out unauthorized (the codex endpoint returns 401)."""
+    import routes.workspace_git_routes as wgr
+    import routes.chat_helpers as chat_helpers
+    import src.ai_interaction as ai_interaction
+    import src.llm_core as llm_core
+
+    client = _client(monkeypatch)
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "f.txt").write_text("base\n", encoding="utf-8")
+    _git(repo, "add", "f.txt")
+    _git(repo, "commit", "-m", "base")
+    # A staged change to describe.
+    (repo / "f.txt").write_text("base\nchanged\n", encoding="utf-8")
+    _git(repo, "add", "f.txt")
+
+    # Fake ChatGPT-Subscription session: model + codex endpoint, but NO persisted
+    # bearer (mirrors how the chat path keeps the token request-local).
+    class _Sess:
+        model = "gpt-5-codex"
+        endpoint_url = "https://chatgpt.com/backend-api/codex"
+        headers: dict = {}
+
+    sess = _Sess()
+
+    class _SM:
+        def get_session(self, _sid):
+            return sess
+
+    monkeypatch.setattr(ai_interaction, "get_session_manager", lambda: _SM())
+
+    # Stand in for the per-request bearer refresh the chat path performs.
+    def _fake_resolve_session_auth(s, session_id, owner=None):
+        s.headers = {"Authorization": "Bearer fresh-token"}
+
+    monkeypatch.setattr(chat_helpers, "resolve_session_auth", _fake_resolve_session_auth)
+
+    captured = {}
+
+    def _fake_llm(url, model, messages, **kwargs):
+        captured["model"] = model
+        captured["headers"] = kwargs.get("headers")
+        return "feat: append a changed line"
+
+    monkeypatch.setattr(llm_core, "llm_call", _fake_llm)
+
+    resp = client.post(
+        "/api/workspace/git/commit-message",
+        json={"workspace": str(repo), "sessionId": "sess-1"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert captured["model"] == "gpt-5-codex"
+    # The fresh, request-local bearer must reach the model call.
+    assert captured["headers"], "no auth headers were sent to the model"
+    assert captured["headers"].get("Authorization") == "Bearer fresh-token"
+
+
+def test_delete_workspace_file_and_folder_and_rejections(monkeypatch, tmp_path):
+    client = _client(monkeypatch)
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "gone.txt").write_text("gone\n", encoding="utf-8")
+    (repo / "keep.txt").write_text("keep\n", encoding="utf-8")
+    _git(repo, "add", "keep.txt")
+    _git(repo, "commit", "-m", "base")  # keep.txt is tracked
+    sub = repo / "sub"
+    sub.mkdir()
+    (sub / "inner.txt").write_text("inner\n", encoding="utf-8")
+
+    # Untracked file.
+    resp = client.post("/api/workspace/file/delete", json={"workspace": str(repo), "path": "gone.txt"})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["ok"] is True
+    assert not (repo / "gone.txt").exists()
+
+    # Tracked file (same code path; shows up as a git deletion afterward).
+    resp = client.post("/api/workspace/file/delete", json={"workspace": str(repo), "path": "keep.txt"})
+    assert resp.status_code == 200
+    assert not (repo / "keep.txt").exists()
+
+    # Folder, recursively.
+    resp = client.post("/api/workspace/file/delete", json={"workspace": str(repo), "path": "sub"})
+    assert resp.status_code == 200
+    assert not sub.exists()
+
+    # Rejections: traversal, forbidden .git component, missing path, workspace root.
+    for bad in ["../escape.txt", ".git/config", "missing.txt", "", "."]:
+        r = client.post("/api/workspace/file/delete", json={"workspace": str(repo), "path": bad})
+        assert r.status_code == 400, f"{bad!r} should be rejected"
+        assert r.json()["ok"] is False
+
+
+def test_delete_file_is_admin_only(monkeypatch, tmp_path):
+    client = _client(monkeypatch, admin=False)
+    r = client.post("/api/workspace/file/delete", json={"workspace": str(tmp_path), "path": "x"})
+    assert r.status_code == 403
+    assert r.json()["code"] == "not_authorized"
