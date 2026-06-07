@@ -775,3 +775,19 @@ def test_files_tab_delete_control():
 def test_files_delete_css_present():
     css = read('static/style.css')
     assert '.wgit-file-del' in css, 'delete-control styles missing'
+
+
+def test_graph_keeps_lane_lines_continuous_through_merges():
+    src = read('static/js/workspaceGit.js')
+    # A merge parent that joins an already-flowing lane must keep that lane's
+    # vertical AND add a separate merge edge (otherwise the line breaks).
+    assert 'mergeEdges' in src and 'originLanes' in src, 'merge-edge handling missing from _computeGraph'
+
+
+def test_files_delete_button_does_not_grow_rows():
+    css = read('static/style.css')
+    idx = css.find('.wgit-file-del {')
+    assert idx != -1, '.wgit-file-del styles missing'
+    block = css[idx:idx + 400]
+    # absolutely positioned + explicit height so the global button{height:32px} can't bloat the row
+    assert 'position: absolute' in block and 'height: 22px' in block
