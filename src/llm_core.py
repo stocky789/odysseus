@@ -540,6 +540,52 @@ def _format_chatgpt_subscription_error(status_code: int, text: str) -> str:
     return _format_upstream_error(status_code, text, "https://chatgpt.com/backend-api/codex")
 
 
+def _chatgpt_subscription_complete(target_url: str, payload: Dict, headers: Dict, timeout: int) -> str:
+    """Synchronous Codex Responses call: stream the SSE response and return the
+    full assistant text. The endpoint only speaks the Responses API, so the
+    generic chat-completions branch of llm_call would be rejected with
+    "Instructions are required"; mirror the streaming path's event handling."""
+    chunks: List[str] = []
+    event_name = ""
+    stream_timeout = httpx.Timeout(connect=3.0, read=float(timeout), write=30.0, pool=5.0)
+    try:
+        with httpx.stream("POST", target_url, json=payload, headers=headers, timeout=stream_timeout) as r:
+            if r.status_code != 200:
+                raw = r.read().decode(errors="replace")
+                raise HTTPException(502, f"Upstream {target_url} -> {r.status_code}: {_format_chatgpt_subscription_error(r.status_code, raw)}")
+            for line in r.iter_lines():
+                if not line:
+                    continue
+                if line.startswith("event:"):
+                    event_name = line[6:].strip()
+                    continue
+                if not line.startswith("data:"):
+                    continue
+                raw = line[5:].strip()
+                if not raw:
+                    continue
+                try:
+                    data = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                evt = data.get("type") or event_name
+                if evt == "response.output_text.delta":
+                    delta = data.get("delta") or ""
+                    if delta:
+                        chunks.append(delta)
+                elif evt == "response.completed":
+                    break
+                elif evt in ("response.failed", "error"):
+                    err = data.get("error") or (data.get("response") or {}).get("error") or {}
+                    text = err.get("message") if isinstance(err, dict) else str(err or "ChatGPT Subscription request failed")
+                    raise HTTPException(502, f"Upstream {target_url} -> {text}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"POST {target_url} failed: {e}")
+    return "".join(chunks)
+
+
 def _format_upstream_error(status: int, body: bytes | str, url: str) -> str:
     """Turn an upstream HTTP error into a user-readable sentence.
 
@@ -1119,6 +1165,14 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
             model, messages_copy, temperature, max_tokens,
             stream=False, num_ctx=get_context_length(url, model),
         )
+    elif provider == "chatgpt-subscription":
+        # The codex endpoint only speaks the Responses API; the generic
+        # chat-completions body below is rejected ("Instructions are required").
+        target_url = _normalize_chatgpt_subscription_url(url)
+        payload = _build_chatgpt_responses_payload(model, messages_copy, temperature, max_tokens, stream=True)
+        response = _chatgpt_subscription_complete(target_url, payload, h, timeout)
+        _set_cached_response(cache_key, response)
+        return response
     else:
         target_url = url
         if provider == "copilot":

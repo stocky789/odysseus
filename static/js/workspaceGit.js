@@ -68,6 +68,7 @@ const EP = {
   files: '/api/workspace/files',
   file: '/api/workspace/file',
   fileSave: '/api/workspace/file/save',
+  fileDelete: '/api/workspace/file/delete',
 };
 
 // Error that carries the backend's stable error code so callers can branch on
@@ -470,8 +471,11 @@ async function _commitStaged() {
   if (!message) { uiModule.showError('Enter a commit message'); return; }
   const ok = await _mutate(async () => {
     await gitApi(EP.commit, { method: 'POST', body: { workspace: state.workspace, message } });
+    // Clear before _mutate's status refresh re-renders the commit box; otherwise
+    // the textarea is rebuilt from the still-set message and the text lingers.
+    state.commitMessage = '';
   });
-  if (ok) { state.commitMessage = ''; uiModule.showToast('Committed'); }
+  if (ok) uiModule.showToast('Committed');
 }
 
 async function _commitSelected() {
@@ -481,8 +485,9 @@ async function _commitSelected() {
   const path = state.selectedPath;
   const ok = await _mutate(async () => {
     await gitApi(EP.commitSelected, { method: 'POST', body: { workspace: state.workspace, paths: [path], message } });
+    state.commitMessage = '';
   });
-  if (ok) { state.commitMessage = ''; uiModule.showToast('Committed selected file'); }
+  if (ok) uiModule.showToast('Committed selected file');
 }
 
 // Draft a commit message from the staged diff using the model selected in chat.
@@ -844,6 +849,7 @@ async function _renderFileBrowser() {
     }, [
       _h('span', { class: 'wgit-file-icon', unsafeHtml: ICON.folder }),
       _h('span', { class: 'wgit-file-name', text: d.name }),
+      _deleteBtn(d.path, d.name, true),
     ]));
   });
   (data.files || []).forEach((f) => {
@@ -855,11 +861,44 @@ async function _renderFileBrowser() {
     }, [
       _h('span', { class: 'wgit-file-icon', unsafeHtml: ICON.file }),
       _h('span', { class: 'wgit-file-name', text: f.name }),
+      _deleteBtn(f.path, f.name, false),
     ]));
   });
   if (!(data.dirs || []).length && !(data.files || []).length) {
     browser.appendChild(_h('div', { class: 'wgit-file-loading', text: 'Empty folder.' }));
   }
+}
+
+// A small trash control on each file/folder row. Reveals on row hover/focus
+// (CSS); stops propagation so it never triggers the row's open/navigate.
+function _deleteBtn(path, name, isDir) {
+  return _h('button', {
+    type: 'button', class: 'wgit-file-del',
+    'aria-label': `Delete ${isDir ? 'folder ' : ''}${name}`, title: 'Delete',
+    onclick: (e) => { e.stopPropagation(); _deleteFile(path, name, isDir); },
+  }, [_h('span', { class: 'wgit-file-del-icon', unsafeHtml: ICON.trash })]);
+}
+
+async function _deleteFile(path, name, isDir) {
+  const what = isDir
+    ? `Delete folder "${name}" and everything inside it? This cannot be undone.`
+    : `Delete "${name}"? This cannot be undone.`;
+  const ok = await uiModule.styledConfirm(what, { confirmText: 'Delete', cancelText: 'Cancel', danger: true });
+  if (!ok) return;
+  const res = await _withBusy(
+    () => gitApi(EP.fileDelete, { method: 'POST', body: { workspace: state.workspace, path } }),
+    'Could not delete',
+  );
+  if (!res.ok) return;
+  // Close the editor if it was showing the deleted file (or a file inside the
+  // deleted folder).
+  const editorPath = state.editor && state.editor.path;
+  if (editorPath && (editorPath === path || (isDir && editorPath.startsWith(`${path}/`)))) {
+    state.editor = null;
+    _renderEditor();
+  }
+  await refreshWorkspaceGitStatus(); // the deletion shows up in Changes
+  _renderFileBrowser();
 }
 
 async function _openFile(path, { conflict = false } = {}) {
