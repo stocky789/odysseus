@@ -741,7 +741,11 @@ function initEndpointForm() {
         apiKey.placeholder = 'No API key needed';
         apiKey.disabled = true;
       }
-      if (testBtn) testBtn.disabled = true;
+      if (testBtn) {
+        testBtn.disabled = true;
+        testBtn.style.opacity = '0.45';
+        testBtn.style.cursor = 'not-allowed';
+      }
       if (addBtn) {
         addBtn.disabled = false;
         addBtn.textContent = 'Add';
@@ -760,7 +764,11 @@ function initEndpointForm() {
         apiKey.placeholder = 'API key';
         apiKey.disabled = false;
       }
-      if (testBtn) testBtn.disabled = false;
+      if (testBtn) {
+        testBtn.disabled = false;
+        testBtn.style.opacity = '';
+        testBtn.style.cursor = '';
+      }
       if (addBtn) {
         addBtn.disabled = false;
         addBtn.textContent = 'Add';

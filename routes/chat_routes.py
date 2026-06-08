@@ -207,38 +207,46 @@ def _recover_empty_session_model(sess, session_id: str, owner: str | None = None
                 is_chatgpt_subscription = is_chatgpt_subscription_base(getattr(ep, "base_url", "") or endpoint_url)
             except Exception:
                 is_chatgpt_subscription = False
-        live_models = []
-        if is_chatgpt_subscription and getattr(ep, "provider_auth_id", None):
-            try:
-                from src.chatgpt_subscription import fetch_available_models
-                from src.endpoint_resolver import resolve_endpoint_runtime
-                _base, api_key = resolve_endpoint_runtime(ep, owner=owner)
-                if api_key:
-                    live_models = fetch_available_models(api_key)
-                    if live_models:
-                        ep.cached_models = json.dumps(live_models)
-                        db.commit()
-            except Exception:
-                live_models = []
-        if is_chatgpt_subscription:
-            # ChatGPT Subscription must use the live Codex catalog only. Do not
-            # recover from stale cached_models rows because those may contain
-            # old hardcoded/synthetic slugs that this account cannot use.
-            cached = live_models
+        try:
+            cached = json.loads(ep.cached_models) if isinstance(ep.cached_models, str) else (ep.cached_models or [])
+        except Exception:
+            cached = []
+        if not cached:
+            visible = []
         else:
             try:
-                cached = json.loads(ep.cached_models) if isinstance(ep.cached_models, str) else (ep.cached_models or [])
+                visible = _visible_models(cached, getattr(ep, "hidden_models", None))
             except Exception:
-                cached = []
-        if not cached:
-            return False
-        try:
-            visible = _visible_models(cached, getattr(ep, "hidden_models", None))
-        except Exception:
-            visible = cached
-        if not visible:
-            return False
+                visible = cached
         if current_model and current_model in {str(item).strip() for item in visible}:
+            return False
+        if is_chatgpt_subscription:
+            live_models = []
+            if getattr(ep, "provider_auth_id", None):
+                try:
+                    from src.chatgpt_subscription import fetch_available_models
+                    from src.endpoint_resolver import resolve_endpoint_runtime
+                    _base, api_key = resolve_endpoint_runtime(ep, owner=owner)
+                    if api_key:
+                        live_models = fetch_available_models(api_key)
+                        if live_models:
+                            ep.cached_models = json.dumps(live_models)
+                            db.commit()
+                except Exception:
+                    live_models = []
+            # ChatGPT Subscription recovery must use the live Codex catalog.
+            # Cached rows are only trusted above to avoid revalidating a model
+            # that is already present in the visible picker list.
+            cached = live_models
+            if not cached:
+                return False
+            try:
+                visible = _visible_models(cached, getattr(ep, "hidden_models", None))
+            except Exception:
+                visible = cached
+            if current_model and current_model in {str(item).strip() for item in visible}:
+                return False
+        if not visible:
             return False
         model = visible[0]
         if not isinstance(model, str) or not model.strip():

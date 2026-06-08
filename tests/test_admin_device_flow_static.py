@@ -28,6 +28,17 @@ def test_provider_selection_is_inert_and_add_button_starts_device_flow():
     assert "_startProviderDeviceAuth(deviceAuthProvider" in add_block
 
 
+def test_device_auth_selection_disables_and_dims_api_test_button():
+    form_block = _between(_ADMIN, "function _setApiFormForProvider()", "function _renderPickerMenu()")
+
+    assert "testBtn.disabled = true" in form_block
+    assert "testBtn.style.opacity = '0.45'" in form_block
+    assert "testBtn.style.cursor = 'not-allowed'" in form_block
+    assert "testBtn.disabled = false" in form_block
+    assert "testBtn.style.opacity = ''" in form_block
+    assert "testBtn.style.cursor = ''" in form_block
+
+
 def test_device_auth_keeps_manual_auth_button_without_auto_opening_tab():
     auth_block = _between(_ADMIN, "async function _startProviderDeviceAuth", "// Local \"Add\" button")
 
